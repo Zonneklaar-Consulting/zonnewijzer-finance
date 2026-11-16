@@ -247,7 +247,7 @@ public class InvoicesControllerTests : IDisposable
         Assert.Equal("Invoices_2024-04.zip", file.FileDownloadName);
         using var zip = new System.IO.Compression.ZipArchive(new MemoryStream(file.FileContents));
         var entry = Assert.Single(zip.Entries);
-        Assert.Equal("Invoice_240501 zonnewijzer U2-1_2024_04.pdf", entry.Name);
+        Assert.Equal("240501 zonnewijzer U2-1.pdf", entry.Name);
         using var pdf = entry.Open();
         using var body = new MemoryStream();
         pdf.CopyTo(body);
