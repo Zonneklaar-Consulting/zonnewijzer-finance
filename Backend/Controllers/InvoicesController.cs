@@ -6,6 +6,7 @@ using Backend.Data;
 using Backend.Models;
 using Backend.Services;
 using System.Globalization;
+using System.IO.Compression;
 using System.Net;
 using System.Text;
 
@@ -617,6 +618,100 @@ namespace Backend.Controllers
                 _logger.LogError(ex, "Error generating invoice overview CSV for {Year}-{Month}", year, month);
                 return BadRequest($"Failed to generate overview CSV: {ex.Message}");
             }
+        }
+
+        [HttpGet("{year:int}/{month:int}/invoices.zip")]
+        public async Task<IActionResult> DownloadMonthInvoicesZip(int year, int month, CancellationToken cancellationToken)
+        {
+            try
+            {
+                var token = Request.Headers.Authorization.ToString().Replace("Bearer ", "");
+                var userIdString = _jwtService.ValidateToken(token);
+
+                if (userIdString == null || !int.TryParse(userIdString, out int currentUserId))
+                    return Unauthorized();
+
+                var requestingUser = await _context.Users.FirstOrDefaultAsync(u => u.Id == currentUserId, cancellationToken);
+                if (requestingUser == null || !requestingUser.Role.IsAppAdministrator())
+                    return Forbid();
+
+                if (month is < 1 or > 12 || year < 2000 || year > 2100)
+                    return BadRequest("Invalid year or month.");
+
+                var appUserIds = await _invoiceComputation.GetAppUserIdsForMonthAsync(
+                    year, month, null, cancellationToken);
+                if (appUserIds.Count == 0)
+                    return NotFound("No invoices for that period.");
+
+                var usedNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                await using var stream = new MemoryStream();
+                using (var zip = new ZipArchive(stream, ZipArchiveMode.Create, leaveOpen: true))
+                {
+                    foreach (var appUserId in appUserIds)
+                    {
+                        var prepared = await BuildInvoicePdfAsync(
+                            appUserId, year, month, createPaymentIfMissing: false, cancellationToken);
+                        if (prepared == null)
+                            continue;
+
+                        var (invoiceData, pdfBytes) = prepared.Value;
+                        var entryName = UniqueZipEntryName(
+                            usedNames,
+                            InvoiceZipEntryName(invoiceData.InvoiceNumber, year, month));
+                        var entry = zip.CreateEntry(entryName, CompressionLevel.Fastest);
+                        await using var entryStream = entry.Open();
+                        await entryStream.WriteAsync(pdfBytes, cancellationToken);
+                    }
+                }
+
+                if (usedNames.Count == 0)
+                    return NotFound("No invoices for that period.");
+
+                _context.EventLogs.Add(new EventLog
+                {
+                    Timestamp = DateTime.UtcNow,
+                    UserName = requestingUser.Name ?? $"User {currentUserId}",
+                    Action = $"Invoice zip download for {year}-{month:D2} ({usedNames.Count} invoices)"
+                });
+                await _context.SaveChangesAsync(cancellationToken);
+
+                return File(stream.ToArray(), "application/zip", $"Invoices_{year}-{month:D2}.zip");
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error generating invoice zip for {Year}-{Month}", year, month);
+                return BadRequest($"Failed to generate invoice zip: {ex.Message}");
+            }
+        }
+
+        private static string InvoiceZipEntryName(string invoiceNumber, int year, int month)
+        {
+            var cleaned = new string(invoiceNumber
+                .Select(ch => ch is '/' or '\\' or ':' or '*' or '?' or '"' or '<' or '>' or '|' ? '_' : ch)
+                .ToArray())
+                .Trim();
+            if (cleaned.Length == 0)
+                cleaned = "invoice";
+            return $"Invoice_{cleaned}_{year}_{month:D2}.pdf";
+        }
+
+        private static string UniqueZipEntryName(HashSet<string> usedNames, string entryName)
+        {
+            if (usedNames.Add(entryName))
+                return entryName;
+
+            var dot = entryName.LastIndexOf('.');
+            var stem = dot > 0 ? entryName[..dot] : entryName;
+            var extension = dot > 0 ? entryName[dot..] : "";
+            var suffix = 2;
+            string candidate;
+            do
+            {
+                candidate = $"{stem}-{suffix}{extension}";
+                suffix++;
+            }
+            while (!usedNames.Add(candidate));
+            return candidate;
         }
 
         /// <summary>

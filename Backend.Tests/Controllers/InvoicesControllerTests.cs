@@ -205,6 +205,58 @@ public class InvoicesControllerTests : IDisposable
     }
 
     [Fact]
+    public async Task DownloadMonthInvoicesZip_NonAdmin_ReturnsForbid()
+    {
+        await SeedAdminAsync();
+        _db.Users.Add(new User { Id = 2, Email = "u@test.com", Name = "U", GoogleId = "g2", Role = UserRole.Base });
+        await _db.SaveChangesAsync();
+
+        var result = await BuildController(userId: "2").DownloadMonthInvoicesZip(2024, 4, CancellationToken.None);
+
+        Assert.IsType<ForbidResult>(result);
+    }
+
+    [Fact]
+    public async Task DownloadMonthInvoicesZip_NoInvoices_ReturnsNotFound()
+    {
+        await SeedAdminAsync();
+
+        var result = await BuildController().DownloadMonthInvoicesZip(2024, 1, CancellationToken.None);
+
+        Assert.IsType<NotFoundObjectResult>(result);
+    }
+
+    [Fact]
+    public async Task DownloadMonthInvoicesZip_WithSessions_ReturnsOnePdfPerInvoice()
+    {
+        await SeedAdminAsync();
+        var appUserId = 2;
+        _db.Users.Add(new User { Id = appUserId, Email = "cardholder@test.com", Name = "Card Holder", GoogleId = "g2", Role = UserRole.Base });
+        var cid = await AddChargeCardAsync("inv-zip");
+        _db.UserChargeCards.Add(new UserChargeCard { UserId = appUserId, ChargeCardId = cid });
+        var t = new DateTime(2024, 4, 8, 9, 0, 0, DateTimeKind.Utc);
+        _db.ChargingSessions.Add(TestData.Session(cid, 1, t, t.AddHours(1), 10));
+        _db.EnergyPrices.Add(new EnergyPrice { Year = 2024, Month = 4, PricePerKwh = 0.30m });
+        await _db.SaveChangesAsync();
+        _pdfMock.Setup(p => p.GenerateInvoicePdf(It.IsAny<InvoiceData>())).Returns(new byte[] { 0x25, 0x50, 0x44, 0x46 });
+
+        var result = await BuildController().DownloadMonthInvoicesZip(2024, 4, CancellationToken.None);
+
+        var file = Assert.IsType<FileContentResult>(result);
+        Assert.Equal("application/zip", file.ContentType);
+        Assert.Equal("Invoices_2024-04.zip", file.FileDownloadName);
+        using var zip = new System.IO.Compression.ZipArchive(new MemoryStream(file.FileContents));
+        var entry = Assert.Single(zip.Entries);
+        Assert.Equal("Invoice_240501 zonnewijzer U2-1_2024_04.pdf", entry.Name);
+        using var pdf = entry.Open();
+        using var body = new MemoryStream();
+        pdf.CopyTo(body);
+        Assert.Equal(new byte[] { 0x25, 0x50, 0x44, 0x46 }, body.ToArray());
+        _mollieMock.Verify(m => m.CreatePaymentAsync(
+            It.IsAny<decimal>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>()), Times.Never);
+    }
+
+    [Fact]
     public async Task DownloadEboekhoudenCsv_WithSessions_ReturnsImportRows()
     {
         await SeedAdminAsync();
