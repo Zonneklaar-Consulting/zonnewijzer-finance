@@ -657,7 +657,7 @@ namespace Backend.Controllers
                         var (invoiceData, pdfBytes) = prepared.Value;
                         var entryName = UniqueZipEntryName(
                             usedNames,
-                            InvoiceZipEntryName(invoiceData.InvoiceNumber, year, month));
+                            InvoiceZipEntryName(invoiceData.InvoiceNumber));
                         var entry = zip.CreateEntry(entryName, CompressionLevel.Fastest);
                         await using var entryStream = entry.Open();
                         await entryStream.WriteAsync(pdfBytes, cancellationToken);
@@ -684,7 +684,7 @@ namespace Backend.Controllers
             }
         }
 
-        private static string InvoiceZipEntryName(string invoiceNumber, int year, int month)
+        private static string InvoiceZipEntryName(string invoiceNumber)
         {
             var cleaned = new string(invoiceNumber
                 .Select(ch => ch is '/' or '\\' or ':' or '*' or '?' or '"' or '<' or '>' or '|' ? '_' : ch)
@@ -692,7 +692,7 @@ namespace Backend.Controllers
                 .Trim();
             if (cleaned.Length == 0)
                 cleaned = "invoice";
-            return $"Invoice_{cleaned}_{year}_{month:D2}.pdf";
+            return $"{cleaned}.pdf";
         }
 
         private static string UniqueZipEntryName(HashSet<string> usedNames, string entryName)
