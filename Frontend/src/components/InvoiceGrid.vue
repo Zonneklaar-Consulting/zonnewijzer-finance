@@ -51,6 +51,15 @@
           <button
             type="button"
             class="btn-csv-month"
+            :disabled="invoicesZipLoading || !monthHasCsvExport"
+            :title="invoicesZipTitle"
+            @click="downloadMonthInvoicesZip"
+          >
+            {{ invoicesZipLoading ? '…' : 'Download invoices' }}
+          </button>
+          <button
+            type="button"
+            class="btn-csv-month"
             :disabled="eboekhoudenLoading || !monthHasCsvExport"
             :title="eboekhoudenTitle"
             @click="downloadEboekhoudenCsv"
@@ -545,6 +554,7 @@ export default {
     const selectedPeriodKey = ref('')
     const emailBulkLoading = ref(false)
     const csvLoading = ref(false)
+    const invoicesZipLoading = ref(false)
     const eboekhoudenLoading = ref(false)
     const enableOnlinePaymentLinks = ref(false)
     const bankFileInput = ref(null)
@@ -614,6 +624,13 @@ export default {
       if (selectedMonthInvoices.value.length === 0)
         return 'No invoices to export for this period.'
       return `Download CSV overview for ${selectedPeriod.value.name} (${selectedMonthInvoices.value.length} invoice(s)).`
+    })
+
+    const invoicesZipTitle = computed(() => {
+      if (!selectedPeriod.value) return 'Select a period.'
+      if (selectedMonthInvoices.value.length === 0)
+        return 'No invoices to download for this period.'
+      return `Download a zip of all ${selectedMonthInvoices.value.length} invoice(s) for ${selectedPeriod.value.name}.`
     })
 
     const eboekhoudenTitle = computed(() => {
@@ -972,6 +989,46 @@ export default {
         alert(typeof msg === 'string' ? msg : JSON.stringify(msg))
       } finally {
         csvLoading.value = false
+      }
+    }
+
+    const downloadMonthInvoicesZip = async () => {
+      if (!selectedPeriod.value) {
+        alert('Select a period.')
+        return
+      }
+      const { year, month } = selectedPeriod.value
+      invoicesZipLoading.value = true
+      try {
+        const token = localStorage.getItem('token')
+        const response = await axios.get(`/api/invoices/${year}/${month}/invoices.zip`, {
+          headers: { Authorization: `Bearer ${token}` },
+          responseType: 'blob'
+        })
+        const blob = new Blob([response.data], { type: 'application/zip' })
+        const url = window.URL.createObjectURL(blob)
+        const link = document.createElement('a')
+        link.href = url
+        link.download = `Invoices_${year}-${String(month).padStart(2, '0')}.zip`
+        document.body.appendChild(link)
+        link.click()
+        document.body.removeChild(link)
+        window.URL.revokeObjectURL(url)
+      } catch (err) {
+        console.error('Invoice zip download failed:', err)
+        let msg = 'Failed to download invoices'
+        if (err.response?.data instanceof Blob) {
+          try {
+            msg = await err.response.data.text()
+          } catch {
+            /* keep default */
+          }
+        } else {
+          msg = err.response?.data?.message || err.response?.data || err.message || msg
+        }
+        alert(typeof msg === 'string' ? msg : JSON.stringify(msg))
+      } finally {
+        invoicesZipLoading.value = false
       }
     }
 
@@ -1579,14 +1636,17 @@ export default {
       selectedPeriodKey,
       emailBulkLoading,
       csvLoading,
+      invoicesZipLoading,
       eboekhoudenLoading,
       monthHasEmailable,
       monthHasCsvExport,
       emailMonthTitle,
       csvMonthTitle,
+      invoicesZipTitle,
       eboekhoudenTitle,
       sendMonthEmails,
       downloadMonthOverviewCsv,
+      downloadMonthInvoicesZip,
       downloadEboekhoudenCsv,
       enableOnlinePaymentLinks,
       bankFileInput,
