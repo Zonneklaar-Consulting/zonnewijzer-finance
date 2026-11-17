@@ -141,6 +141,37 @@ public class ChargingStationsController : ControllerBase
     [HttpGet("smappee-charging-station-display-names")]
     public async Task<IActionResult> GetSmappeeChargingStationDisplayNames(CancellationToken cancellationToken = default)
     {
+        var built = await BuildHomeSquaresAsync(cancellationToken);
+        return Ok(new { squares = built.Squares, serialNumbers = built.SerialNumbers });
+    }
+
+    /// <summary>Public wall display: five stations, occupied or free, and the e-Boekhouden code of the user on the active card.</summary>
+    [AllowAnonymous]
+    [HttpGet("/api/display/stations")]
+    public async Task<IActionResult> GetPublicDisplay(CancellationToken cancellationToken = default)
+    {
+        var built = await BuildHomeSquaresAsync(cancellationToken);
+        var codes = await UserCodesBySerialAsync(built.Squares, cancellationToken);
+        return Ok(new
+        {
+            stations = built.Squares.Select(station => new
+            {
+                name = station.Name,
+                inUse = station.InUse,
+                userCode = station.InUse
+                    && station.Serial != null
+                    && codes.TryGetValue(station.Serial, out var code)
+                    ? code
+                    : null,
+                energyKwh = station.InUse ? station.EnergyKwh : null,
+                powerWatts = station.InUse ? station.PowerWatts : null,
+                endedAtUtc = station.InUse ? null : station.EndedAtUtc
+            })
+        });
+    }
+
+    private async Task<HomeSquaresResult> BuildHomeSquaresAsync(CancellationToken cancellationToken)
+    {
         const string chargingStationType = "charging station";
         var locRows = await _context.SmappeeServiceLocations.AsNoTracking()
             .Where(s => s.AppliancesJson != null && s.AppliancesJson != "")
@@ -207,12 +238,8 @@ public class ChargingStationsController : ControllerBase
         var discoveredSerialsMatchedByName = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         try
         {
-            var latest = await _context.SmappeeStatusSnapshots
-                .AsNoTracking()
-                .Where(x => x.IsSuccess)
-                .OrderByDescending(x => x.FetchedAtUtc)
-                .FirstOrDefaultAsync(cancellationToken);
-            var live = latest == null ? null : JsonSerializer.Deserialize<SmappeeChargingLiveResponse>(latest.PayloadJson);
+            var recentLive = await LoadRecentLiveSnapshotsAsync(cancellationToken);
+            var live = recentLive.Count == 0 ? null : recentLive[0].Response;
             if (live != null)
             {
                 serialToLiveInfo = new Dictionary<string, HomeSquareLiveInfo>(StringComparer.OrdinalIgnoreCase);
@@ -223,8 +250,15 @@ public class ChargingStationsController : ControllerBase
                 foreach (var p in live.Points)
                 {
                     var mapped = MapChargingPointUiStateToHomeLiveState(p.UiState);
-                    var liveInfo = new HomeSquareLiveInfo(mapped, EstimatePowerKwForHomeSquare(p, mapped));
                     var sn = (p.SerialNumber ?? "").Trim();
+                    var liveInfo = new HomeSquareLiveInfo(
+                        mapped,
+                        EstimatePowerKwForHomeSquare(p, mapped),
+                        string.IsNullOrWhiteSpace(p.Rfid) ? null : p.Rfid.Trim(),
+                        p.EnergyKwh,
+                        p.EndedAtUtc,
+                        string.IsNullOrWhiteSpace(sn) ? null : sn,
+                        CurrentChargingWatts(sn, p, mapped, recentLive));
                     var hasMatchedSerial = false;
                     if (!string.IsNullOrEmpty(sn))
                     {
@@ -357,16 +391,174 @@ public class ChargingStationsController : ControllerBase
                 Name = w.Name,
                 LiveState = liveState,
                 InUse = IsHomeSquareInUse(liveState),
-                PowerKw = liveInfo?.PowerKw
+                PowerKw = liveInfo?.PowerKw,
+                Serial = w.Serial,
+                Rfid = liveInfo?.Rfid,
+                EnergyKwh = liveInfo?.EnergyKwh,
+                EndedAtUtc = liveInfo?.EndedAtUtc,
+                SessionSerial = liveInfo?.SessionSerial,
+                PowerWatts = liveInfo?.PowerWatts
             });
         }
 
         var mergedSquares = MergeSquaresByNormalizedNameKeepingStrongest(squares);
+        await FillEndedAtFromSessionsAsync(mergedSquares, cancellationToken);
         var serialNumbers = discoveredSerials
             .OrderBy(x => x, StringComparer.OrdinalIgnoreCase)
             .ToArray();
-        return Ok(new { squares = mergedSquares, serialNumbers });
+        return new HomeSquaresResult(mergedSquares, serialNumbers);
     }
+
+    private async Task FillEndedAtFromSessionsAsync(
+        IReadOnlyList<ChargingStationHomeSquareDto> squares,
+        CancellationToken cancellationToken)
+    {
+        var serials = squares
+            .Where(station => !station.InUse)
+            .SelectMany(SerialsForStation)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        if (serials.Count == 0)
+            return;
+
+        var ended = await _context.ChargingSessions
+            .AsNoTracking()
+            .Where(session => session.ToTimestamp != null && session.SerialNumber != null && serials.Contains(session.SerialNumber))
+            .GroupBy(session => session.SerialNumber!)
+            .Select(group => new { Serial = group.Key, EndedMs = group.Max(session => session.ToTimestamp) })
+            .ToListAsync(cancellationToken);
+
+        var endedBySerial = new Dictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase);
+        foreach (var row in ended)
+        {
+            if (row.EndedMs is not long ms || ms <= 0)
+                continue;
+            endedBySerial[row.Serial] = DateTimeOffset.FromUnixTimeMilliseconds(ms).UtcDateTime;
+        }
+
+        foreach (var station in squares)
+        {
+            if (station.InUse)
+                continue;
+            DateTime? latest = station.EndedAtUtc;
+            foreach (var serial in SerialsForStation(station))
+            {
+                if (endedBySerial.TryGetValue(serial, out var fromSession) && (latest == null || fromSession > latest))
+                    latest = fromSession;
+            }
+            station.EndedAtUtc = latest;
+        }
+    }
+
+    private static IEnumerable<string> SerialsForStation(ChargingStationHomeSquareDto station)
+    {
+        if (!string.IsNullOrWhiteSpace(station.Serial))
+            yield return station.Serial.Trim();
+        if (!string.IsNullOrWhiteSpace(station.SessionSerial))
+            yield return station.SessionSerial.Trim();
+        foreach (var pair in HardcodedStationNameBySerial)
+        {
+            if (string.Equals(pair.Value, station.Name, StringComparison.OrdinalIgnoreCase))
+                yield return pair.Key;
+        }
+    }
+
+    private async Task<Dictionary<string, string>> UserCodesBySerialAsync(
+        IReadOnlyList<ChargingStationHomeSquareDto> squares,
+        CancellationToken cancellationToken)
+    {
+        var codes = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var occupied = squares
+            .Where(station => station.InUse && !string.IsNullOrWhiteSpace(station.Serial))
+            .ToList();
+        if (occupied.Count == 0)
+            return codes;
+
+        var openSessions = await _context.ChargingSessions
+            .AsNoTracking()
+            .Where(session => session.ToTimestamp == null && session.SerialNumber != null && session.SerialNumber != "")
+            .OrderByDescending(session => session.FromTimestamp)
+            .Select(session => new { session.SerialNumber, session.ChargeCardId })
+            .ToListAsync(cancellationToken);
+
+        var cardBySerial = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        foreach (var session in openSessions)
+        {
+            var serial = session.SerialNumber!.Trim();
+            if (!cardBySerial.ContainsKey(serial))
+                cardBySerial[serial] = session.ChargeCardId;
+        }
+
+        var cards = await _context.ChargeCards
+            .AsNoTracking()
+            .Select(card => new { card.Id, card.Value })
+            .ToListAsync(cancellationToken);
+        var cardIdByToken = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        foreach (var card in cards)
+        {
+            if (string.IsNullOrWhiteSpace(card.Value))
+                continue;
+            var token = ChargeCardImportIds.NormalizeTokenKey(card.Value);
+            if (token.Length > 0 && !cardIdByToken.ContainsKey(token))
+                cardIdByToken[token] = card.Id;
+        }
+
+        var cardIds = new HashSet<int>();
+        foreach (var station in occupied)
+        {
+            if (cardBySerial.TryGetValue(station.Serial!, out var fromSession))
+            {
+                cardIds.Add(fromSession);
+                continue;
+            }
+
+            if (string.IsNullOrWhiteSpace(station.Rfid))
+                continue;
+            var token = ChargeCardImportIds.NormalizeTokenKey(station.Rfid);
+            if (cardIdByToken.TryGetValue(token, out var fromRfid))
+                cardIds.Add(fromRfid);
+        }
+
+        if (cardIds.Count == 0)
+            return codes;
+
+        var codeRows = await _context.UserChargeCards
+            .AsNoTracking()
+            .Where(link => cardIds.Contains(link.ChargeCardId))
+            .Join(
+                _context.Users.AsNoTracking(),
+                link => link.UserId,
+                user => user.Id,
+                (link, user) => new { link.ChargeCardId, user.Id, user.EboekhoudenCode })
+            .ToListAsync(cancellationToken);
+        var codeByCard = new Dictionary<int, string>();
+        foreach (var row in codeRows)
+        {
+            var code = EboekhoudenRelationCodes.StoredCode(row.EboekhoudenCode) ?? row.Id.ToString();
+            if (!codeByCard.ContainsKey(row.ChargeCardId))
+                codeByCard[row.ChargeCardId] = code;
+        }
+
+        foreach (var station in occupied)
+        {
+            int? cardId = null;
+            if (cardBySerial.TryGetValue(station.Serial!, out var fromSession))
+                cardId = fromSession;
+            else if (!string.IsNullOrWhiteSpace(station.Rfid))
+            {
+                var token = ChargeCardImportIds.NormalizeTokenKey(station.Rfid);
+                if (cardIdByToken.TryGetValue(token, out var fromRfid))
+                    cardId = fromRfid;
+            }
+
+            if (cardId.HasValue && codeByCard.TryGetValue(cardId.Value, out var code))
+                codes[station.Serial!] = code;
+        }
+
+        return codes;
+    }
+
+    private sealed record HomeSquaresResult(List<ChargingStationHomeSquareDto> Squares, string[] SerialNumbers);
 
     /// <summary>Green = no session, yellow = idle (preparing/suspended), red = active (charging).</summary>
     private static string MapChargingPointUiStateToHomeLiveState(string? uiState) =>
@@ -424,6 +616,76 @@ public class ChargingStationsController : ControllerBase
         return decimal.Round(kw, 2, MidpointRounding.AwayFromZero);
     }
 
+    private async Task<List<RecentLiveSnapshot>> LoadRecentLiveSnapshotsAsync(CancellationToken cancellationToken)
+    {
+        var rows = await _context.SmappeeStatusSnapshots
+            .AsNoTracking()
+            .Where(x => x.IsSuccess && x.PayloadJson != null && x.PayloadJson != "")
+            .OrderByDescending(x => x.FetchedAtUtc)
+            .Take(8)
+            .Select(x => new { x.FetchedAtUtc, x.PayloadJson })
+            .ToListAsync(cancellationToken);
+
+        var recent = new List<RecentLiveSnapshot>(rows.Count);
+        foreach (var row in rows)
+        {
+            var response = JsonSerializer.Deserialize<SmappeeChargingLiveResponse>(row.PayloadJson);
+            if (response == null)
+                continue;
+            recent.Add(new RecentLiveSnapshot(row.FetchedAtUtc, response));
+        }
+
+        return recent;
+    }
+
+    /// <summary>
+    /// Watts drawn right now. A connected session that is not charging is 0.
+    /// While charging, use the energy added since the previous reading in the last 20 minutes.
+    /// </summary>
+    private static int? CurrentChargingWatts(
+        string serial,
+        ChargingPointLiveDto point,
+        string homeLiveState,
+        IReadOnlyList<RecentLiveSnapshot> recent)
+    {
+        if (homeLiveState == ChargingStationHomeSquareDto.LiveStateIdle)
+            return 0;
+        if (homeLiveState != ChargingStationHomeSquareDto.LiveStateActive || recent.Count == 0 || string.IsNullOrEmpty(serial))
+            return null;
+
+        var latest = recent[0];
+        foreach (var earlier in recent.Skip(1))
+        {
+            var age = latest.FetchedAtUtc - earlier.FetchedAtUtc;
+            if (age < TimeSpan.FromSeconds(60))
+                continue;
+            if (age > TimeSpan.FromMinutes(20))
+                break;
+
+            var previous = earlier.Response.Points.FirstOrDefault(candidate =>
+                string.Equals((candidate.SerialNumber ?? "").Trim(), serial, StringComparison.OrdinalIgnoreCase));
+            if (previous == null || !SameChargingSession(point, previous) || !point.EnergyKwh.HasValue || !previous.EnergyKwh.HasValue)
+                continue;
+
+            var hours = (decimal)age.TotalHours;
+            if (hours <= 0m)
+                continue;
+            var deltaKwh = point.EnergyKwh.Value - previous.EnergyKwh.Value;
+            if (deltaKwh < 0m)
+                return 0;
+            return (int)decimal.Round(deltaKwh / hours * 1000m, 0, MidpointRounding.AwayFromZero);
+        }
+
+        return null;
+    }
+
+    private static bool SameChargingSession(ChargingPointLiveDto current, ChargingPointLiveDto previous)
+    {
+        if (current.StartedAtUtc.HasValue && previous.StartedAtUtc.HasValue)
+            return current.StartedAtUtc.Value == previous.StartedAtUtc.Value;
+        return current.StartedAtUtc.HasValue == previous.StartedAtUtc.HasValue;
+    }
+
     private static string? ResolveHardcodedStationName(string? serial)
     {
         var sn = (serial ?? "").Trim();
@@ -449,12 +711,17 @@ public class ChargingStationsController : ControllerBase
             }
 
             var stronger = PickStrongerHomeLiveInfo(
-                new HomeSquareLiveInfo(current.LiveState ?? ChargingStationHomeSquareDto.LiveStateFree, current.PowerKw),
-                new HomeSquareLiveInfo(square.LiveState ?? ChargingStationHomeSquareDto.LiveStateFree, square.PowerKw));
+                new HomeSquareLiveInfo(current.LiveState ?? ChargingStationHomeSquareDto.LiveStateFree, current.PowerKw, current.Rfid, current.EnergyKwh, current.EndedAtUtc, current.SessionSerial, current.PowerWatts),
+                new HomeSquareLiveInfo(square.LiveState ?? ChargingStationHomeSquareDto.LiveStateFree, square.PowerKw, square.Rfid, square.EnergyKwh, square.EndedAtUtc, square.SessionSerial, square.PowerWatts));
 
             current.LiveState = stronger.LiveState;
             current.InUse = IsHomeSquareInUse(stronger.LiveState);
             current.PowerKw = stronger.PowerKw;
+            current.Rfid = stronger.Rfid;
+            current.EnergyKwh = stronger.EnergyKwh;
+            current.EndedAtUtc = stronger.EndedAtUtc;
+            current.SessionSerial = stronger.SessionSerial;
+            current.PowerWatts = stronger.PowerWatts;
         }
 
         var result = new List<ChargingStationHomeSquareDto>(order.Count);
@@ -463,7 +730,16 @@ public class ChargingStationsController : ControllerBase
         return result;
     }
 
-    private sealed record HomeSquareLiveInfo(string LiveState, decimal? PowerKw);
+    private sealed record RecentLiveSnapshot(DateTime FetchedAtUtc, SmappeeChargingLiveResponse Response);
+
+    private sealed record HomeSquareLiveInfo(
+        string LiveState,
+        decimal? PowerKw,
+        string? Rfid = null,
+        decimal? EnergyKwh = null,
+        DateTime? EndedAtUtc = null,
+        string? SessionSerial = null,
+        int? PowerWatts = null);
 
     private static SmappeeServiceLocationDevice? MatchDeviceToAppliance(
         List<SmappeeServiceLocationDevice> devices,

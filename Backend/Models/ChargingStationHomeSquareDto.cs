@@ -1,3 +1,5 @@
+using System.Text.Json.Serialization;
+
 namespace Backend.Models;
 
 /// <summary>Home dashboard tile for a charging station appliance (name + optional live state from Smappee).</summary>
@@ -25,4 +27,28 @@ public class ChargingStationHomeSquareDto
     /// Null when unavailable.
     /// </summary>
     public decimal? PowerKw { get; set; }
+
+    /// <summary>Matched charger serial. Not part of the home API response.</summary>
+    [JsonIgnore]
+    public string? Serial { get; set; }
+
+    /// <summary>RFID of the live session. Not part of any API response.</summary>
+    [JsonIgnore]
+    public string? Rfid { get; set; }
+
+    /// <summary>Energy delivered by the live session, in kWh. Not part of the home API response.</summary>
+    [JsonIgnore]
+    public decimal? EnergyKwh { get; set; }
+
+    /// <summary>When the latest session on this station ended. Not part of the home API response.</summary>
+    [JsonIgnore]
+    public DateTime? EndedAtUtc { get; set; }
+
+    /// <summary>Serial of the live Smappee point, which can differ from the stored device serial.</summary>
+    [JsonIgnore]
+    public string? SessionSerial { get; set; }
+
+    /// <summary>Current charging power in watts. Not part of the home API response.</summary>
+    [JsonIgnore]
+    public int? PowerWatts { get; set; }
 }
