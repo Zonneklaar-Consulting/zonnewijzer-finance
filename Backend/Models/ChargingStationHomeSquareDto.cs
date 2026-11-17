@@ -35,4 +35,20 @@ public class ChargingStationHomeSquareDto
     /// <summary>RFID of the live session. Not part of any API response.</summary>
     [JsonIgnore]
     public string? Rfid { get; set; }
+
+    /// <summary>Energy delivered by the live session, in kWh. Not part of the home API response.</summary>
+    [JsonIgnore]
+    public decimal? EnergyKwh { get; set; }
+
+    /// <summary>When the latest session on this station ended. Not part of the home API response.</summary>
+    [JsonIgnore]
+    public DateTime? EndedAtUtc { get; set; }
+
+    /// <summary>Serial of the live Smappee point, which can differ from the stored device serial.</summary>
+    [JsonIgnore]
+    public string? SessionSerial { get; set; }
+
+    /// <summary>Current charging power in watts. Not part of the home API response.</summary>
+    [JsonIgnore]
+    public int? PowerWatts { get; set; }
 }

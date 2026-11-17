@@ -15,6 +15,8 @@
       >
         <h2>{{ station.name }}</h2>
         <p class="state">{{ station.inUse ? 'Bezet' : 'Vrij' }}</p>
+        <p v-if="powerText(station)" class="level">{{ powerText(station) }}</p>
+        <p v-if="levelText(station)" class="level">{{ levelText(station) }}</p>
         <p v-if="station.inUse && station.userCode" class="code">{{ station.userCode }}</p>
       </article>
     </div>
@@ -32,6 +34,50 @@ export default {
     const loading = ref(true)
     const error = ref('')
     let timer = null
+
+    const formatWatts = (value) => {
+      if (value === null || value === undefined || value === '')
+        return ''
+      const number = Number(value)
+      if (!Number.isFinite(number))
+        return ''
+      return `${new Intl.NumberFormat('nl-NL', { maximumFractionDigits: 0 }).format(number)} W`
+    }
+
+    const formatKwh = (value) => {
+      if (value === null || value === undefined || value === '')
+        return ''
+      const number = Number(value)
+      if (!Number.isFinite(number))
+        return ''
+      return `${new Intl.NumberFormat('nl-NL', { minimumFractionDigits: 1, maximumFractionDigits: 1 }).format(number)} kWh`
+    }
+
+    const formatEndedAgo = (value) => {
+      const then = new Date(value).getTime()
+      if (!Number.isFinite(then))
+        return ''
+      const minutes = Math.max(0, Math.round((Date.now() - then) / 60000))
+      if (minutes < 1)
+        return 'zojuist geëindigd'
+      if (minutes < 60)
+        return `${minutes} min geleden`
+      const hours = Math.round(minutes / 60)
+      if (hours < 48)
+        return hours === 1 ? '1 uur geleden' : `${hours} uur geleden`
+      const days = Math.round(hours / 24)
+      return days === 1 ? '1 dag geleden' : `${days} dagen geleden`
+    }
+
+    const powerText = (station) => station.inUse ? formatWatts(station.powerWatts) : ''
+
+    const levelText = (station) => {
+      if (station.inUse)
+        return formatKwh(station.energyKwh)
+      if (station.endedAtUtc)
+        return formatEndedAgo(station.endedAtUtc)
+      return ''
+    }
 
     const gridStyle = computed(() => ({
       gridTemplateColumns: `repeat(${Math.max(stations.value.length, 1)}, minmax(0, 1fr))`
@@ -59,7 +105,7 @@ export default {
         window.clearInterval(timer)
     })
 
-    return { stations, loading, error, gridStyle }
+    return { stations, loading, error, gridStyle, levelText, powerText }
   }
 }
 </script>
@@ -129,6 +175,7 @@ h1 {
 
 h2,
 .state,
+.level,
 .code {
   margin: 0;
   text-align: center;
@@ -143,6 +190,11 @@ h2 {
   font-weight: 700;
   letter-spacing: 0.04em;
   text-transform: uppercase;
+}
+
+.level {
+  font-size: clamp(1.2rem, 2vw, 1.8rem);
+  font-weight: 650;
 }
 
 .code {

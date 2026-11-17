@@ -563,6 +563,23 @@ public class ChargingStationsControllerTests : IDisposable
         _db.SmappeeStatusSnapshots.Add(new SmappeeStatusSnapshot
         {
             ServiceLocationId = 1,
+            FetchedAtUtc = now.AddMinutes(-5),
+            IsSuccess = true,
+            PayloadJson = """
+                          {
+                            "FetchedAt":"2026-11-17T17:55:00Z",
+                            "ServiceLocationId":1,
+                            "Points":[
+                              {"SerialNumber":"5821063866","StationName":"Paal 1","UiState":"charging","Rfid":"CARD-WIM","EnergyKwh":17.6,"StartedAtUtc":"2026-11-17T17:00:00Z"}
+                            ],
+                            "RangeStartMs":0,
+                            "RangeEndMsExclusive":0
+                          }
+                          """
+        });
+        _db.SmappeeStatusSnapshots.Add(new SmappeeStatusSnapshot
+        {
+            ServiceLocationId = 1,
             FetchedAtUtc = now,
             IsSuccess = true,
             PayloadJson = """
@@ -570,9 +587,10 @@ public class ChargingStationsControllerTests : IDisposable
                             "FetchedAt":"2026-11-17T18:00:00Z",
                             "ServiceLocationId":1,
                             "Points":[
-                              {"SerialNumber":"5821063866","StationName":"Paal 1","UiState":"charging","Rfid":"CARD-WIM"},
+                              {"SerialNumber":"5821063866","StationName":"Paal 1","UiState":"charging","Rfid":"CARD-WIM","EnergyKwh":18.4,"StartedAtUtc":"2026-11-17T17:00:00Z"},
                               {"SerialNumber":"5821063800","StationName":"Paal 2","UiState":"available","Rfid":"CARD-OLD"},
-                              {"SerialNumber":"5821063911","StationName":"Paal 3","UiState":"charging","Rfid":"CARD-NOCODE"}
+                              {"SerialNumber":"5821063911","StationName":"Paal 3","UiState":"charging","Rfid":"CARD-NOCODE"},
+                              {"SerialNumber":"5821063919","StationName":"Paal 4","UiState":"suspended","Rfid":"CARD-NOCODE"}
                             ],
                             "RangeStartMs":0,
                             "RangeEndMsExclusive":0
@@ -595,10 +613,22 @@ public class ChargingStationsControllerTests : IDisposable
         var noCode = stations.Single(s => s.GetProperty("name").GetString() == "Paal 3");
         Assert.True(busy.GetProperty("inUse").GetBoolean());
         Assert.Equal("WIM", busy.GetProperty("userCode").GetString());
+        Assert.Equal(18.4m, busy.GetProperty("energyKwh").GetDecimal());
+        Assert.Equal(9600, busy.GetProperty("powerWatts").GetInt32());
+        Assert.Equal(JsonValueKind.Null, busy.GetProperty("endedAtUtc").ValueKind);
         Assert.False(free.GetProperty("inUse").GetBoolean());
         Assert.Equal(JsonValueKind.Null, free.GetProperty("userCode").ValueKind);
+        Assert.Equal(JsonValueKind.Null, free.GetProperty("energyKwh").ValueKind);
+        Assert.Equal(JsonValueKind.Null, free.GetProperty("powerWatts").ValueKind);
+        Assert.Equal(
+            DateTimeOffset.FromUnixTimeMilliseconds(1_600_000_100_000).UtcDateTime,
+            free.GetProperty("endedAtUtc").GetDateTime().ToUniversalTime());
         Assert.True(noCode.GetProperty("inUse").GetBoolean());
         Assert.Equal("9", noCode.GetProperty("userCode").GetString());
+        Assert.Equal(JsonValueKind.Null, noCode.GetProperty("powerWatts").ValueKind);
+        var paused = stations.Single(s => s.GetProperty("name").GetString() == "Paal 4");
+        Assert.True(paused.GetProperty("inUse").GetBoolean());
+        Assert.Equal(0, paused.GetProperty("powerWatts").GetInt32());
     }
 
 }
