@@ -2,7 +2,7 @@
   <div class="event-log-page">
     <div class="page-header">
       <h1>Events</h1>
-      <p class="description">Activity log of logins, uploads, and invoice downloads.</p>
+      <p class="description">Activity log of logins, uploads, invoice downloads, and charging sessions that ended.</p>
     </div>
 
     <div v-if="!isAdmin" class="access-denied">
@@ -175,5 +175,9 @@ export default {
 
 .username {
   font-weight: 500;
+}
+
+.action {
+  overflow-wrap: anywhere;
 }
 </style>

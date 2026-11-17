@@ -36,7 +36,9 @@ public class SmappeeChargingSessionMergeTests
 
         var closed = SmappeeChargingSessionMerge.InferCloseFromNextSessionOnSameCard(sessions);
 
-        Assert.Equal(1, closed);
+        var close = Assert.Single(closed);
+        Assert.Same(sessions[0], close.Closed);
+        Assert.Same(sessions[1], close.OpenedNext);
         Assert.Equal(5000, sessions[0].ToTimestamp);
         Assert.Equal("STOPPED", sessions[0].Status);
         Assert.Null(sessions[1].ToTimestamp);

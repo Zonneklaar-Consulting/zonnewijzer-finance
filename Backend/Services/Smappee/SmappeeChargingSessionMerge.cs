@@ -22,16 +22,19 @@ internal static class SmappeeChargingSessionMerge
         return byId.Values.ToList();
     }
 
+    /// <summary>An open session closed because a later open session exists on the same charge card.</summary>
+    public sealed record InferredSessionClose(ChargingSession Closed, ChargingSession OpenedNext);
+
     /// <summary>
     /// When a charge card has multiple open sessions, only the latest may still be ongoing.
     /// Closes older open rows at the start of the next session on the same card.
     /// </summary>
-    public static int InferCloseFromNextSessionOnSameCard(IReadOnlyList<ChargingSession> openSessions)
+    public static IReadOnlyList<InferredSessionClose> InferCloseFromNextSessionOnSameCard(IReadOnlyList<ChargingSession> openSessions)
     {
         if (openSessions.Count == 0)
-            return 0;
+            return Array.Empty<InferredSessionClose>();
 
-        var closed = 0;
+        var closed = new List<InferredSessionClose>();
         foreach (var group in openSessions.GroupBy(s => s.ChargeCardId))
         {
             var ordered = group.OrderBy(s => s.FromTimestamp).ToList();
@@ -53,7 +56,7 @@ internal static class SmappeeChargingSessionMerge
                     current.Duration = durationSeconds;
                 }
 
-                closed++;
+                closed.Add(new InferredSessionClose(current, next));
             }
         }
 
