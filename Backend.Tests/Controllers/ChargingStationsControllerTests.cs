@@ -631,4 +631,73 @@ public class ChargingStationsControllerTests : IDisposable
         Assert.Equal(0, paused.GetProperty("powerWatts").GetInt32());
     }
 
+    [Fact]
+    public async Task GetPublicDisplay_KeepsStationOccupiedWhenTheOpenSessionFallsOutsideTheLiveSnapshot()
+    {
+        var now = DateTime.UtcNow;
+        _db.Users.Add(new User
+        {
+            Id = 5,
+            Email = "wmt@example.com",
+            Name = "Wim",
+            EboekhoudenCode = "wmt28"
+        });
+        _db.ChargeCards.Add(new ChargeCard { Id = 12, Value = "CARD-OPEN" });
+        _db.UserChargeCards.Add(new UserChargeCard { UserId = 5, ChargeCardId = 12 });
+        _db.ChargingSessions.Add(new ChargingSession
+        {
+            SerialNumber = "5821063800",
+            Rfid = "CARD-OPEN",
+            ChargeCardId = 12,
+            StationId = 2,
+            Status = "SUSPENDED",
+            FromTimestamp = new DateTimeOffset(now.AddHours(-25)).ToUnixTimeMilliseconds(),
+            ToTimestamp = null,
+            StartReading = 0m,
+            StopReading = 26.584m
+        });
+        _db.SmappeeServiceLocations.Add(new SmappeeServiceLocation
+        {
+            ServiceLocationId = 1,
+            AppliancesJson = """[{"id":2,"name":"Paal 2","type":"charging station"}]"""
+        });
+        _db.SmappeeServiceLocationDevices.Add(new SmappeeServiceLocationDevice
+        {
+            ServiceLocationId = 1,
+            DeviceSerialNumber = "6531001272",
+            Name = "Paal 2"
+        });
+        _db.SmappeeStatusSnapshots.Add(new SmappeeStatusSnapshot
+        {
+            ServiceLocationId = 1,
+            FetchedAtUtc = now,
+            IsSuccess = true,
+            PayloadJson = """
+                          {
+                            "FetchedAt":"2026-11-17T19:02:00Z",
+                            "ServiceLocationId":1,
+                            "Points":[
+                              {"SerialNumber":"6531001272","StationName":"Paal 2","UiState":"available"}
+                            ],
+                            "RangeStartMs":0,
+                            "RangeEndMsExclusive":0
+                          }
+                          """
+        });
+        await _db.SaveChangesAsync();
+
+        var result = await BuildController().GetPublicDisplay(default);
+
+        var ok = Assert.IsType<OkObjectResult>(result);
+        var json = JsonSerializer.Serialize(ok.Value, new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase });
+        Assert.DoesNotContain("CARD-OPEN", json);
+        using var doc = JsonDocument.Parse(json);
+        var station = doc.RootElement.GetProperty("stations").EnumerateArray().Single(s => s.GetProperty("name").GetString() == "Paal 2");
+        Assert.True(station.GetProperty("inUse").GetBoolean());
+        Assert.Equal("wmt28", station.GetProperty("userCode").GetString());
+        Assert.Equal(26.584m, station.GetProperty("energyKwh").GetDecimal());
+        Assert.Equal(0, station.GetProperty("powerWatts").GetInt32());
+        Assert.Equal(JsonValueKind.Null, station.GetProperty("endedAtUtc").ValueKind);
+    }
+
 }

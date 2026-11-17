@@ -71,6 +71,18 @@ public class SmappeePollingService : ISmappeePollingService
             var rangeEndMs = now.ToUnixTimeMilliseconds();
             var lookbackHours = Math.Clamp(_daemonOptions.LookbackHours, 1, 24 * 14);
             var rangeStartMs = now.AddHours(-lookbackHours).ToUnixTimeMilliseconds();
+            var oldestOpenFromMs = await _db.ChargingSessions
+                .AsNoTracking()
+                .Where(session => session.ToTimestamp == null && session.FromTimestamp > 0)
+                .Select(session => (long?)session.FromTimestamp)
+                .MinAsync(cancellationToken);
+            if (oldestOpenFromMs is long openFromMs)
+            {
+                var includeFromMs = openFromMs - TimeSpan.FromHours(1).TotalMilliseconds;
+                var earliestAllowedMs = now.AddDays(-14).ToUnixTimeMilliseconds();
+                if (includeFromMs < rangeStartMs)
+                    rangeStartMs = (long)Math.Max(includeFromMs, earliestAllowedMs);
+            }
             var (active, completed, smappeeParkSerials) = await _cloudClient.GetChargingLiveDataAsync(
                 _options.ServiceLocationId,
                 rangeStartMs,
@@ -163,6 +175,20 @@ public class SmappeePollingService : ISmappeePollingService
                     oldestActiveFromDate.Value);
                 from = oldestActiveFromDate.Value;
             }
+
+            var oldestOpenFromDate = await OldestOpenSessionDateAsync(brusselsTimeZone, cancellationToken);
+            var earliestSyncFrom = todayBrussels.AddDays(-14);
+            if (oldestOpenFromDate.HasValue && oldestOpenFromDate.Value < from)
+            {
+                var extendedFrom = oldestOpenFromDate.Value < earliestSyncFrom
+                    ? earliestSyncFrom
+                    : oldestOpenFromDate.Value;
+                _logger.LogInformation(
+                    "Extending Smappee daemon calendar sync lookback from {DefaultFrom} to {ExtendedFrom} to include an open session stored locally.",
+                    from,
+                    extendedFrom);
+                from = extendedFrom;
+            }
             _logger.LogDebug(
                 "Smappee daemon calendar sync executing: trigger=scheduled, from={From}, to={To}",
                 from,
@@ -214,6 +240,23 @@ public class SmappeePollingService : ISmappeePollingService
             await _db.SaveChangesAsync(cancellationToken);
             return failed;
         }
+    }
+
+    private async Task<DateOnly?> OldestOpenSessionDateAsync(
+        TimeZoneInfo brusselsTimeZone,
+        CancellationToken cancellationToken)
+    {
+        var oldestFromMs = await _db.ChargingSessions
+            .AsNoTracking()
+            .Where(session => session.ToTimestamp == null && session.FromTimestamp > 0)
+            .Select(session => (long?)session.FromTimestamp)
+            .MinAsync(cancellationToken);
+        if (oldestFromMs is not long fromMs)
+            return null;
+
+        var fromUtc = DateTimeOffset.FromUnixTimeMilliseconds(fromMs).UtcDateTime;
+        var fromBrussels = TimeZoneInfo.ConvertTimeFromUtc(fromUtc, brusselsTimeZone);
+        return DateOnly.FromDateTime(fromBrussels);
     }
 
     private static DateOnly? FindOldestActiveSessionDate(
