@@ -106,9 +106,9 @@ public class SmappeeChargingSyncService : ISmappeeChargingSyncService
         }
 
         var (sessAdded, sessUpdated, sessSkipped, sessErrors) =
-            await UpsertSessionsFromSmappeeAsync(sessionsDto, cancellationToken);
+            await UpsertSessionsFromSmappeeAsync(sessionsDto, eventLogUserName, cancellationToken);
 
-        var sessInferredClosed = await InferCloseStaleOpenSessionsAsync(cancellationToken);
+        var sessInferredClosed = await InferCloseStaleOpenSessionsAsync(eventLogUserName, cancellationToken);
 
         // Avoid noisy event log entries when no new sessions were imported.
         // Keep logging when at least one session was added, inferred closed, or processing errors occurred.
@@ -205,6 +205,7 @@ public class SmappeeChargingSyncService : ISmappeeChargingSyncService
 
     private async Task<(int Added, int Updated, int Skipped, int Errors)> UpsertSessionsFromSmappeeAsync(
         IReadOnlyList<SmappeeSessionDto> list,
+        string eventLogUserName,
         CancellationToken cancellationToken)
     {
         var defaultConn = _options.DefaultConnector ?? "1";
@@ -323,19 +324,29 @@ public class SmappeeChargingSyncService : ISmappeeChargingSyncService
                 {
                     var wasOpen = !existing.ToTimestamp.HasValue;
                     var closingNow = wasOpen && dto.To.HasValue;
+                    var previousStatus = existing.Status;
                     MapDtoToSession(existing, dto, card.Id, stationId, serial, defaultConn);
                     updated++;
 
                     if (closingNow)
                     {
                         _logger.LogInformation(
-                            "Smappee session closed: sessionId={SessionId}, dbRowId={DbRowId}, from={FromTimestamp}, to={ToTimestamp}, stationId={StationId}, chargeCardId={ChargeCardId}",
+                            "Smappee session closed: sessionId={SessionId}, dbRowId={DbRowId}, serial={Serial}, from={FromTimestamp}, to={ToTimestamp}, stationId={StationId}, chargeCardId={ChargeCardId}, previousStatus={PreviousStatus}, status={Status}",
                             existing.SmappeeSessionId,
                             existing.Id,
+                            existing.SerialNumber,
                             existing.FromTimestamp,
                             existing.ToTimestamp,
                             existing.StationId,
-                            existing.ChargeCardId);
+                            existing.ChargeCardId,
+                            previousStatus,
+                            existing.Status);
+                        _context.EventLogs.Add(new EventLog
+                        {
+                            Timestamp = DateTime.UtcNow,
+                            UserName = eventLogUserName,
+                            Action = SmappeeReportedEndAction(existing, previousStatus)
+                        });
                     }
                 }
                 else
@@ -403,20 +414,59 @@ public class SmappeeChargingSyncService : ISmappeeChargingSyncService
         session.StationId = stationId;
     }
 
-    private async Task<int> InferCloseStaleOpenSessionsAsync(CancellationToken cancellationToken)
+    private async Task<int> InferCloseStaleOpenSessionsAsync(string eventLogUserName, CancellationToken cancellationToken)
     {
         var openSessions = await _context.ChargingSessions
             .Where(s => !s.ToTimestamp.HasValue)
             .ToListAsync(cancellationToken);
 
         var inferredClosed = SmappeeChargingSessionMerge.InferCloseFromNextSessionOnSameCard(openSessions);
-        if (inferredClosed == 0)
+        if (inferredClosed.Count == 0)
             return 0;
+
+        foreach (var close in inferredClosed)
+        {
+            var closed = close.Closed;
+            var next = close.OpenedNext;
+            _logger.LogInformation(
+                "Smappee session inferred closed: sessionId={SessionId}, dbRowId={DbRowId}, serial={Serial}, chargeCardId={ChargeCardId}, from={FromTimestamp}, to={ToTimestamp}, nextSessionId={NextSessionId}, nextDbRowId={NextDbRowId}, nextFrom={NextFrom}",
+                closed.SmappeeSessionId,
+                closed.Id,
+                closed.SerialNumber,
+                closed.ChargeCardId,
+                closed.FromTimestamp,
+                closed.ToTimestamp,
+                next.SmappeeSessionId,
+                next.Id,
+                next.FromTimestamp);
+            _context.EventLogs.Add(new EventLog
+            {
+                Timestamp = DateTime.UtcNow,
+                UserName = eventLogUserName,
+                Action = InferredEndAction(closed, next)
+            });
+        }
 
         await _context.SaveChangesAsync(cancellationToken);
         _logger.LogInformation(
             "Smappee sync: inferred end time for {Count} stale open session(s) from a later session on the same charge card",
-            inferredClosed);
-        return inferredClosed;
+            inferredClosed.Count);
+        return inferredClosed.Count;
+    }
+
+    private static string SmappeeReportedEndAction(ChargingSession session, string? previousStatus)
+    {
+        var ended = session.ToTimestamp is long toMs ? BrusselsTime.FormatBrussels(toMs) : "unknown";
+        return
+            $"Charging session {session.Id} (Smappee {session.SmappeeSessionId}, serial {session.SerialNumber}, card {session.ChargeCardId}) ended because Smappee reported an end. " +
+            $"Started {BrusselsTime.FormatBrussels(session.FromTimestamp)}, ended {ended} Brussels. Status {previousStatus ?? "unknown"} -> {session.Status ?? "unknown"}.";
+    }
+
+    private static string InferredEndAction(ChargingSession closed, ChargingSession next)
+    {
+        var ended = closed.ToTimestamp is long toMs ? BrusselsTime.FormatBrussels(toMs) : "unknown";
+        return
+            $"Charging session {closed.Id} (Smappee {closed.SmappeeSessionId}, serial {closed.SerialNumber}, card {closed.ChargeCardId}) ended because later session {next.Id} (Smappee {next.SmappeeSessionId}) started on the same card. " +
+            $"Started {BrusselsTime.FormatBrussels(closed.FromTimestamp)}, ended {ended} Brussels.";
     }
 }

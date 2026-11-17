@@ -80,6 +80,14 @@ public static class BrusselsTime
         return y == year && m == month;
     }
 
+    /// <summary>Brussels wall clock, <c>yyyy-MM-dd HH:mm:ss</c>. Assumes milliseconds.</summary>
+    public static string FormatBrussels(long unixMs)
+    {
+        var utc = DateTimeOffset.FromUnixTimeMilliseconds(unixMs).UtcDateTime;
+        var brussels = TimeZoneInfo.ConvertTimeFromUtc(utc, BrusselsTz);
+        return brussels.ToString("yyyy-MM-dd HH:mm:ss");
+    }
+
     /// <summary>Assumes <paramref name="unixMs"/> is <strong>milliseconds</strong> (EF / Smappee convention).</summary>
     public static string DescribeUnixMilliseconds(long unixMs)
     {
