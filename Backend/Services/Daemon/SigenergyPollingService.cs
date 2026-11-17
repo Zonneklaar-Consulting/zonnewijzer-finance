@@ -4,7 +4,7 @@ using Backend.Models;
 using Backend.Services.Sigenergy;
 using Microsoft.Extensions.Options;
 
-namespace IntegrationDaemon.Services;
+namespace Backend.Services.Daemon;
 
 public interface ISigenergyPollingService
 {

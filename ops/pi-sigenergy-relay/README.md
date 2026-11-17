@@ -25,7 +25,7 @@ Set:
 SIGENERGY_BASE_URL=http://10.0.0.3:18080
 ```
 
-Then restart your `integration-daemon` service/container.
+Then recreate the `finance-backend` container so it picks up the new URL.
 
 ## Test from server
 

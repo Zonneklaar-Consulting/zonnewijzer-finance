@@ -3,7 +3,7 @@
     <div class="page-header">
       <div>
         <h1>Sigenergy state</h1>
-        <p class="description">Latest snapshot stored by the integration daemon.</p>
+        <p class="description">Latest snapshot stored by the backend.</p>
       </div>
       <div class="header-actions">
         <div v-if="lastRefreshAt" class="last-refresh">

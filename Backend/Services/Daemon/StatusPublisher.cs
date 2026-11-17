@@ -1,4 +1,4 @@
-namespace IntegrationDaemon.Services;
+namespace Backend.Services.Daemon;
 
 public interface IStatusPublisher
 {

@@ -1,17 +1,17 @@
 using Microsoft.Extensions.Options;
 
-namespace IntegrationDaemon.Services;
+namespace Backend.Services.Daemon;
 
-public class SigenergyPollWorker : BackgroundService
+public class SmappeePollWorker : BackgroundService
 {
     private readonly IServiceScopeFactory _scopeFactory;
-    private readonly IOptionsMonitor<SigenergyDaemonOptions> _options;
-    private readonly ILogger<SigenergyPollWorker> _logger;
+    private readonly IOptionsMonitor<SmappeeDaemonOptions> _options;
+    private readonly ILogger<SmappeePollWorker> _logger;
 
-    public SigenergyPollWorker(
+    public SmappeePollWorker(
         IServiceScopeFactory scopeFactory,
-        IOptionsMonitor<SigenergyDaemonOptions> options,
-        ILogger<SigenergyPollWorker> logger)
+        IOptionsMonitor<SmappeeDaemonOptions> options,
+        ILogger<SmappeePollWorker> logger)
     {
         _scopeFactory = scopeFactory;
         _options = options;
@@ -20,24 +20,24 @@ public class SigenergyPollWorker : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        _logger.LogInformation("Sigenergy poll worker started");
+        _logger.LogInformation("Smappee poll worker started");
         while (!stoppingToken.IsCancellationRequested)
         {
             var o = _options.CurrentValue;
             if (!o.Enabled)
             {
-                _logger.LogDebug("Sigenergy poll worker disabled; sleeping 30s");
+                _logger.LogDebug("Smappee poll worker disabled; sleeping 30s");
                 await Task.Delay(TimeSpan.FromSeconds(30), stoppingToken);
                 continue;
             }
 
             try
             {
-                _logger.LogInformation("Sigenergy poll cycle started");
+                _logger.LogInformation("Smappee poll cycle started");
                 using var scope = _scopeFactory.CreateScope();
-                var service = scope.ServiceProvider.GetRequiredService<ISigenergyPollingService>();
-                await service.PollEnergyFlowAsync(stoppingToken);
-                _logger.LogInformation("Sigenergy poll cycle completed");
+                var service = scope.ServiceProvider.GetRequiredService<ISmappeePollingService>();
+                await service.PollSessionsAsync(stoppingToken);
+                _logger.LogInformation("Smappee poll cycle completed");
             }
             catch (OperationCanceledException)
             {
@@ -45,11 +45,11 @@ public class SigenergyPollWorker : BackgroundService
             }
             catch (Exception ex)
             {
-                _logger.LogWarning(ex, "Sigenergy daemon cycle failed");
+                _logger.LogWarning(ex, "Smappee daemon cycle failed");
             }
 
             await Task.Delay(TimeSpan.FromMinutes(Math.Max(1, o.PollIntervalMinutes)), stoppingToken);
         }
-        _logger.LogInformation("Sigenergy poll worker stopped");
+        _logger.LogInformation("Smappee poll worker stopped");
     }
 }

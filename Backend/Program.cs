@@ -8,7 +8,10 @@ using System.Text;
 using System.Security.Claims;
 using Backend.Data;
 using Backend.Services;
+using Microsoft.Extensions.Options;
+using Backend.Services.Daemon;
 using Backend.Services.IntegrationDaemon;
+using Backend.Services.Sigenergy;
 using Backend.Services.Smappee;
 using Serilog;
 using Serilog.Events;
@@ -121,10 +124,21 @@ builder.Services.AddReverseProxy().LoadFromMemory(
 
 // Add custom services
 builder.Services.Configure<IntegrationDaemonOptions>(builder.Configuration.GetSection(IntegrationDaemonOptions.SectionName));
-builder.Services.AddHttpClient<IIntegrationDaemonClient, IntegrationDaemonClient>(client =>
+builder.Services.Configure<SmappeeDaemonOptions>(builder.Configuration.GetSection(SmappeeDaemonOptions.SectionName));
+builder.Services.Configure<SigenergyDaemonOptions>(builder.Configuration.GetSection(SigenergyDaemonOptions.SectionName));
+builder.Services.Configure<SigenergyOptions>(builder.Configuration.GetSection(SigenergyOptions.SectionName));
+
+builder.Services.AddHttpClient(SigenergyCloudClient.HttpClientName, (sp, client) =>
 {
-    client.Timeout = TimeSpan.FromSeconds(30);
+    var o = sp.GetRequiredService<IOptions<SigenergyOptions>>().Value;
+    var raw = (string.IsNullOrWhiteSpace(o.BaseUrl) ? "https://api-eu.sigencloud.com" : o.BaseUrl).Trim().TrimEnd('/');
+    if (Uri.TryCreate(raw + "/", UriKind.Absolute, out var baseUri))
+        client.BaseAddress = baseUri;
+    client.Timeout = TimeSpan.FromMinutes(2);
 });
+builder.Services.AddSingleton<ISigenergyCloudClient, SigenergyCloudClient>();
+builder.Services.AddSingleton<SigenergyDiagnosticsService>();
+builder.Services.AddSingleton<IStatusPublisher, DbOnlyStatusPublisher>();
 
 builder.Services.AddScoped<IJwtService, JwtService>();
 builder.Services.Configure<SmappeeOptions>(builder.Configuration.GetSection(SmappeeOptions.SectionName));
@@ -133,6 +147,11 @@ builder.Services.AddHttpClient<ISmappeeCloudClient, SmappeeCloudClient>(client =
     client.Timeout = TimeSpan.FromMinutes(2);
 });
 builder.Services.AddScoped<ISmappeeChargingSyncService, SmappeeChargingSyncService>();
+builder.Services.AddScoped<ISmappeePollingService, SmappeePollingService>();
+builder.Services.AddScoped<ISigenergyPollingService, SigenergyPollingService>();
+builder.Services.AddScoped<IIntegrationDaemonClient, IntegrationDaemonClient>();
+builder.Services.AddHostedService<SmappeePollWorker>();
+builder.Services.AddHostedService<SigenergyPollWorker>();
 builder.Services.AddScoped<IChargingSessionReconcileService, ChargingSessionReconcileService>();
 builder.Services.AddScoped<ISmappeeCombinedInvoiceSessionSource, SmappeeCombinedInvoiceSessionSource>();
 builder.Services.AddScoped<IInvoiceComputationService, InvoiceComputationService>();
@@ -174,8 +193,7 @@ var app = builder.Build();
         var context = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
         context.Database.Migrate();
         DevelopmentAdminSeed.Apply(builder.Configuration, context);
-
-        Log.Information("Backend started in integration-agnostic mode (provider polling handled by integration daemon).");
+        LogIntegrationSettings(app.Logger, scope.ServiceProvider);
     }
 
     // Configure the HTTP request pipeline.
@@ -228,6 +246,49 @@ catch (Exception ex)
 finally
 {
     Log.CloseAndFlush();
+}
+
+static void LogIntegrationSettings(Microsoft.Extensions.Logging.ILogger logger, IServiceProvider services)
+{
+    var smappee = services.GetRequiredService<IOptions<SmappeeOptions>>().Value;
+    var sigenergy = services.GetRequiredService<IOptions<SigenergyOptions>>().Value;
+    var smappeeDaemon = services.GetRequiredService<IOptions<SmappeeDaemonOptions>>().Value;
+    var sigenergyDaemon = services.GetRequiredService<IOptions<SigenergyDaemonOptions>>().Value;
+
+    var missingSmappee = smappee.GetMissingCredentialFields();
+    if (smappeeDaemon.Enabled && smappee.ServiceLocationId > 0 && missingSmappee.Count > 0)
+    {
+        logger.LogError(
+            "Smappee polling is enabled but credentials are incomplete. Missing: {Missing}",
+            string.Join(", ", missingSmappee));
+    }
+    else if (smappeeDaemon.Enabled && smappee.ServiceLocationId <= 0)
+    {
+        logger.LogError("Smappee polling is enabled but ServiceLocationId is not configured.");
+    }
+    else
+    {
+        logger.LogInformation(
+            "Smappee polling: enabled={Enabled}, serviceLocationId={ServiceLocationId}, credentialsComplete={CredentialsComplete}",
+            smappeeDaemon.Enabled,
+            smappee.ServiceLocationId,
+            missingSmappee.Count == 0);
+    }
+
+    var missingSigenergy = sigenergy.GetMissingSettings();
+    if (sigenergyDaemon.Enabled && missingSigenergy.Count > 0)
+    {
+        logger.LogError(
+            "Sigenergy polling is enabled but settings are incomplete. Missing: {Missing}",
+            string.Join(", ", missingSigenergy));
+    }
+    else
+    {
+        logger.LogInformation(
+            "Sigenergy polling: enabled={Enabled}, configured={Configured}",
+            sigenergyDaemon.Enabled,
+            missingSigenergy.Count == 0);
+    }
 }
 
 static void TryBackupSqliteBeforeMigrate(IHostEnvironment env, string? connectionString)
