@@ -21,4 +21,7 @@ public class ChargingPointLiveDto
     public DateTime? StartedAtUtc { get; set; }
     public DateTime? EndedAtUtc { get; set; }
     public string? RfidMasked { get; set; }
+
+    /// <summary>Full RFID from the live session. Used only to resolve a user code; not returned by public APIs.</summary>
+    public string? Rfid { get; set; }
 }

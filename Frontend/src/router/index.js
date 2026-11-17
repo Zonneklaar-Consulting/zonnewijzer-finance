@@ -16,6 +16,7 @@ import EventLog from '../components/EventLog.vue'
 import EnergyPrices from '../components/EnergyPrices.vue'
 import ChargingStationsPage from '../components/ChargingStationsPage.vue'
 import AdminSigenergyState from '../components/AdminSigenergyState.vue'
+import PublicDisplay from '../components/PublicDisplay.vue'
 import CombinedInvoicesAprMay2026 from '../components/CombinedInvoicesAprMay2026.vue'
 import { isAppAdmin, roleFromToken, canManageUserProfiles } from '../utils/roles'
 
@@ -30,6 +31,11 @@ const routes = [
     path: '/',
     name: 'Home',
     component: Home
+  },
+  {
+    path: '/display',
+    name: 'PublicDisplay',
+    component: PublicDisplay
   },
   {
     path: '/users',

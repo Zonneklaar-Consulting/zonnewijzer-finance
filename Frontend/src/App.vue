@@ -1,6 +1,6 @@
 <template>
-  <div id="app">
-    <nav class="navbar">
+  <div id="app" :class="{ 'public-display': isPublicDisplay }">
+    <nav v-if="!isPublicDisplay" class="navbar">
       <router-link to="/" class="navbar-brand">
         <img src="/assets/zonnewijzer_logo.png" alt="Zonnewijzer Logo" class="logo">
         <h1>Zonnewijzer Finance</h1>
@@ -90,7 +90,7 @@
 
 <script>
 import { ref, onMounted, onBeforeUnmount, watch, nextTick, provide, computed } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import axios from 'axios'
 import { isAppAdmin, canManageUserProfiles } from './utils/roles'
 
@@ -99,7 +99,9 @@ export default {
   setup() {
     const user = ref(null)
     const previewMode = ref(false)
+    const route = useRoute()
     const router = useRouter()
+    const isPublicDisplay = computed(() => route.path === '/display')
     const googleClientId = '367881736099-4g29mnk5ho3a1iuosd5uo4ut284gbpql.apps.googleusercontent.com'
     const mainNav = ref(null)
     const dropdownWrapper = ref(null)
@@ -259,6 +261,7 @@ export default {
 
     return {
       user,
+      isPublicDisplay,
       isAppAdminUser,
       canManageUserProfiles,
       previewMode,
@@ -444,6 +447,10 @@ body {
 
 .sign-out-btn:hover {
   background-color: #c82333;
+}
+
+#app.public-display main {
+  padding: 0;
 }
 
 main {

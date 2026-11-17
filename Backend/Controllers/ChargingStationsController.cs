@@ -141,6 +141,34 @@ public class ChargingStationsController : ControllerBase
     [HttpGet("smappee-charging-station-display-names")]
     public async Task<IActionResult> GetSmappeeChargingStationDisplayNames(CancellationToken cancellationToken = default)
     {
+        var built = await BuildHomeSquaresAsync(cancellationToken);
+        return Ok(new { squares = built.Squares, serialNumbers = built.SerialNumbers });
+    }
+
+    /// <summary>Public wall display: five stations, occupied or free, and the e-Boekhouden code of the user on the active card.</summary>
+    [AllowAnonymous]
+    [HttpGet("/api/display/stations")]
+    public async Task<IActionResult> GetPublicDisplay(CancellationToken cancellationToken = default)
+    {
+        var built = await BuildHomeSquaresAsync(cancellationToken);
+        var codes = await UserCodesBySerialAsync(built.Squares, cancellationToken);
+        return Ok(new
+        {
+            stations = built.Squares.Select(station => new
+            {
+                name = station.Name,
+                inUse = station.InUse,
+                userCode = station.InUse
+                    && station.Serial != null
+                    && codes.TryGetValue(station.Serial, out var code)
+                    ? code
+                    : null
+            })
+        });
+    }
+
+    private async Task<HomeSquaresResult> BuildHomeSquaresAsync(CancellationToken cancellationToken)
+    {
         const string chargingStationType = "charging station";
         var locRows = await _context.SmappeeServiceLocations.AsNoTracking()
             .Where(s => s.AppliancesJson != null && s.AppliancesJson != "")
@@ -223,7 +251,10 @@ public class ChargingStationsController : ControllerBase
                 foreach (var p in live.Points)
                 {
                     var mapped = MapChargingPointUiStateToHomeLiveState(p.UiState);
-                    var liveInfo = new HomeSquareLiveInfo(mapped, EstimatePowerKwForHomeSquare(p, mapped));
+                    var liveInfo = new HomeSquareLiveInfo(
+                        mapped,
+                        EstimatePowerKwForHomeSquare(p, mapped),
+                        string.IsNullOrWhiteSpace(p.Rfid) ? null : p.Rfid.Trim());
                     var sn = (p.SerialNumber ?? "").Trim();
                     var hasMatchedSerial = false;
                     if (!string.IsNullOrEmpty(sn))
@@ -357,7 +388,9 @@ public class ChargingStationsController : ControllerBase
                 Name = w.Name,
                 LiveState = liveState,
                 InUse = IsHomeSquareInUse(liveState),
-                PowerKw = liveInfo?.PowerKw
+                PowerKw = liveInfo?.PowerKw,
+                Serial = w.Serial,
+                Rfid = liveInfo?.Rfid
             });
         }
 
@@ -365,8 +398,105 @@ public class ChargingStationsController : ControllerBase
         var serialNumbers = discoveredSerials
             .OrderBy(x => x, StringComparer.OrdinalIgnoreCase)
             .ToArray();
-        return Ok(new { squares = mergedSquares, serialNumbers });
+        return new HomeSquaresResult(mergedSquares, serialNumbers);
     }
+
+    private async Task<Dictionary<string, string>> UserCodesBySerialAsync(
+        IReadOnlyList<ChargingStationHomeSquareDto> squares,
+        CancellationToken cancellationToken)
+    {
+        var codes = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var occupied = squares
+            .Where(station => station.InUse && !string.IsNullOrWhiteSpace(station.Serial))
+            .ToList();
+        if (occupied.Count == 0)
+            return codes;
+
+        var openSessions = await _context.ChargingSessions
+            .AsNoTracking()
+            .Where(session => session.ToTimestamp == null && session.SerialNumber != null && session.SerialNumber != "")
+            .OrderByDescending(session => session.FromTimestamp)
+            .Select(session => new { session.SerialNumber, session.ChargeCardId })
+            .ToListAsync(cancellationToken);
+
+        var cardBySerial = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        foreach (var session in openSessions)
+        {
+            var serial = session.SerialNumber!.Trim();
+            if (!cardBySerial.ContainsKey(serial))
+                cardBySerial[serial] = session.ChargeCardId;
+        }
+
+        var cards = await _context.ChargeCards
+            .AsNoTracking()
+            .Select(card => new { card.Id, card.Value })
+            .ToListAsync(cancellationToken);
+        var cardIdByToken = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        foreach (var card in cards)
+        {
+            if (string.IsNullOrWhiteSpace(card.Value))
+                continue;
+            var token = ChargeCardImportIds.NormalizeTokenKey(card.Value);
+            if (token.Length > 0 && !cardIdByToken.ContainsKey(token))
+                cardIdByToken[token] = card.Id;
+        }
+
+        var cardIds = new HashSet<int>();
+        foreach (var station in occupied)
+        {
+            if (cardBySerial.TryGetValue(station.Serial!, out var fromSession))
+            {
+                cardIds.Add(fromSession);
+                continue;
+            }
+
+            if (string.IsNullOrWhiteSpace(station.Rfid))
+                continue;
+            var token = ChargeCardImportIds.NormalizeTokenKey(station.Rfid);
+            if (cardIdByToken.TryGetValue(token, out var fromRfid))
+                cardIds.Add(fromRfid);
+        }
+
+        if (cardIds.Count == 0)
+            return codes;
+
+        var codeRows = await _context.UserChargeCards
+            .AsNoTracking()
+            .Where(link => cardIds.Contains(link.ChargeCardId))
+            .Join(
+                _context.Users.AsNoTracking(),
+                link => link.UserId,
+                user => user.Id,
+                (link, user) => new { link.ChargeCardId, user.Id, user.EboekhoudenCode })
+            .ToListAsync(cancellationToken);
+        var codeByCard = new Dictionary<int, string>();
+        foreach (var row in codeRows)
+        {
+            var code = EboekhoudenRelationCodes.StoredCode(row.EboekhoudenCode) ?? row.Id.ToString();
+            if (!codeByCard.ContainsKey(row.ChargeCardId))
+                codeByCard[row.ChargeCardId] = code;
+        }
+
+        foreach (var station in occupied)
+        {
+            int? cardId = null;
+            if (cardBySerial.TryGetValue(station.Serial!, out var fromSession))
+                cardId = fromSession;
+            else if (!string.IsNullOrWhiteSpace(station.Rfid))
+            {
+                var token = ChargeCardImportIds.NormalizeTokenKey(station.Rfid);
+                if (cardIdByToken.TryGetValue(token, out var fromRfid))
+                    cardId = fromRfid;
+            }
+
+            if (cardId.HasValue && codeByCard.TryGetValue(cardId.Value, out var code))
+                codes[station.Serial!] = code;
+        }
+
+        return codes;
+    }
+
+    private sealed record HomeSquaresResult(List<ChargingStationHomeSquareDto> Squares, string[] SerialNumbers);
 
     /// <summary>Green = no session, yellow = idle (preparing/suspended), red = active (charging).</summary>
     private static string MapChargingPointUiStateToHomeLiveState(string? uiState) =>
@@ -449,12 +579,13 @@ public class ChargingStationsController : ControllerBase
             }
 
             var stronger = PickStrongerHomeLiveInfo(
-                new HomeSquareLiveInfo(current.LiveState ?? ChargingStationHomeSquareDto.LiveStateFree, current.PowerKw),
-                new HomeSquareLiveInfo(square.LiveState ?? ChargingStationHomeSquareDto.LiveStateFree, square.PowerKw));
+                new HomeSquareLiveInfo(current.LiveState ?? ChargingStationHomeSquareDto.LiveStateFree, current.PowerKw, current.Rfid),
+                new HomeSquareLiveInfo(square.LiveState ?? ChargingStationHomeSquareDto.LiveStateFree, square.PowerKw, square.Rfid));
 
             current.LiveState = stronger.LiveState;
             current.InUse = IsHomeSquareInUse(stronger.LiveState);
             current.PowerKw = stronger.PowerKw;
+            current.Rfid = stronger.Rfid;
         }
 
         var result = new List<ChargingStationHomeSquareDto>(order.Count);
@@ -463,7 +594,7 @@ public class ChargingStationsController : ControllerBase
         return result;
     }
 
-    private sealed record HomeSquareLiveInfo(string LiveState, decimal? PowerKw);
+    private sealed record HomeSquareLiveInfo(string LiveState, decimal? PowerKw, string? Rfid = null);
 
     private static SmappeeServiceLocationDevice? MatchDeviceToAppliance(
         List<SmappeeServiceLocationDevice> devices,

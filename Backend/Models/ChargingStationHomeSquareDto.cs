@@ -1,3 +1,5 @@
+using System.Text.Json.Serialization;
+
 namespace Backend.Models;
 
 /// <summary>Home dashboard tile for a charging station appliance (name + optional live state from Smappee).</summary>
@@ -25,4 +27,12 @@ public class ChargingStationHomeSquareDto
     /// Null when unavailable.
     /// </summary>
     public decimal? PowerKw { get; set; }
+
+    /// <summary>Matched charger serial. Not part of the home API response.</summary>
+    [JsonIgnore]
+    public string? Serial { get; set; }
+
+    /// <summary>RFID of the live session. Not part of any API response.</summary>
+    [JsonIgnore]
+    public string? Rfid { get; set; }
 }

@@ -252,7 +252,8 @@ public static class SmappeeChargingLiveMapper
                 EnergyKwh = live.Energy,
                 StartedAtUtc = UtcFromMs(fromMs),
                 EndedAtUtc = toMs.HasValue ? UtcFromMs(toMs.Value) : null,
-                RfidMasked = MaskRfid(live.Rfid)
+                RfidMasked = MaskRfid(live.Rfid),
+                Rfid = string.IsNullOrWhiteSpace(live.Rfid) ? null : live.Rfid.Trim()
             };
         }
 

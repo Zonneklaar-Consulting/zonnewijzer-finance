@@ -503,4 +503,102 @@ public class ChargingStationsControllerTests : IDisposable
         Assert.Equal("9999999999", serialNumbers[1].GetString());
     }
 
+    [Fact]
+    public async Task GetPublicDisplay_ShowsUserCodeOnlyWhileTheStationIsInUse()
+    {
+        var now = DateTime.UtcNow;
+        _db.Users.Add(new User
+        {
+            Id = 7,
+            Email = "driver@example.com",
+            Name = "Driver",
+            EboekhoudenCode = "WIM"
+        });
+        _db.Users.Add(new User
+        {
+            Id = 8,
+            Email = "other@example.com",
+            Name = "Other",
+            EboekhoudenCode = "OLD"
+        });
+        _db.Users.Add(new User
+        {
+            Id = 9,
+            Email = "nocode@example.com",
+            Name = "No Code"
+        });
+        _db.ChargeCards.Add(new ChargeCard { Id = 3, Value = "CARD-WIM" });
+        _db.ChargeCards.Add(new ChargeCard { Id = 4, Value = "CARD-OLD" });
+        _db.ChargeCards.Add(new ChargeCard { Id = 5, Value = "CARD-NOCODE" });
+        _db.UserChargeCards.Add(new UserChargeCard { UserId = 7, ChargeCardId = 3 });
+        _db.UserChargeCards.Add(new UserChargeCard { UserId = 8, ChargeCardId = 4 });
+        _db.UserChargeCards.Add(new UserChargeCard { UserId = 9, ChargeCardId = 5 });
+        _db.ChargingSessions.Add(new ChargingSession
+        {
+            SerialNumber = "5821063866",
+            Rfid = "CARD-WIM",
+            ChargeCardId = 3,
+            StationId = 1,
+            FromTimestamp = 1_700_000_000_000,
+            ToTimestamp = null
+        });
+        _db.ChargingSessions.Add(new ChargingSession
+        {
+            SerialNumber = "5821063800",
+            Rfid = "CARD-OLD",
+            ChargeCardId = 4,
+            StationId = 2,
+            FromTimestamp = 1_600_000_000_000,
+            ToTimestamp = 1_600_000_100_000
+        });
+        _db.ChargingSessions.Add(new ChargingSession
+        {
+            SerialNumber = "5821063911",
+            Rfid = "CARD-NOCODE",
+            ChargeCardId = 5,
+            StationId = 3,
+            FromTimestamp = 1_700_000_000_000,
+            ToTimestamp = null
+        });
+        _db.SmappeeStatusSnapshots.Add(new SmappeeStatusSnapshot
+        {
+            ServiceLocationId = 1,
+            FetchedAtUtc = now,
+            IsSuccess = true,
+            PayloadJson = """
+                          {
+                            "FetchedAt":"2026-11-17T18:00:00Z",
+                            "ServiceLocationId":1,
+                            "Points":[
+                              {"SerialNumber":"5821063866","StationName":"Paal 1","UiState":"charging","Rfid":"CARD-WIM"},
+                              {"SerialNumber":"5821063800","StationName":"Paal 2","UiState":"available","Rfid":"CARD-OLD"},
+                              {"SerialNumber":"5821063911","StationName":"Paal 3","UiState":"charging","Rfid":"CARD-NOCODE"}
+                            ],
+                            "RangeStartMs":0,
+                            "RangeEndMsExclusive":0
+                          }
+                          """
+        });
+        await _db.SaveChangesAsync();
+
+        var result = await BuildController().GetPublicDisplay(default);
+
+        var ok = Assert.IsType<OkObjectResult>(result);
+        var json = JsonSerializer.Serialize(ok.Value, new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase });
+        Assert.DoesNotContain("CARD-WIM", json);
+        Assert.DoesNotContain("CARD-OLD", json);
+        Assert.DoesNotContain("CARD-NOCODE", json);
+        using var doc = JsonDocument.Parse(json);
+        var stations = doc.RootElement.GetProperty("stations").EnumerateArray().ToList();
+        var busy = stations.Single(s => s.GetProperty("name").GetString() == "Paal 1");
+        var free = stations.Single(s => s.GetProperty("name").GetString() == "Paal 2");
+        var noCode = stations.Single(s => s.GetProperty("name").GetString() == "Paal 3");
+        Assert.True(busy.GetProperty("inUse").GetBoolean());
+        Assert.Equal("WIM", busy.GetProperty("userCode").GetString());
+        Assert.False(free.GetProperty("inUse").GetBoolean());
+        Assert.Equal(JsonValueKind.Null, free.GetProperty("userCode").ValueKind);
+        Assert.True(noCode.GetProperty("inUse").GetBoolean());
+        Assert.Equal("9", noCode.GetProperty("userCode").GetString());
+    }
+
 }
