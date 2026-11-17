@@ -1,194 +1,133 @@
-using System.Net.Http.Json;
+using Backend.Services.Daemon;
+using Backend.Services.Smappee;
 using Microsoft.Extensions.Options;
 
 namespace Backend.Services.IntegrationDaemon;
 
 public sealed class IntegrationDaemonClient : IIntegrationDaemonClient
 {
-    private readonly HttpClient _httpClient;
+    private readonly ISmappeeChargingSyncService _sync;
+    private readonly ISmappeePollingService _smappeePolling;
+    private readonly ISigenergyPollingService _sigenergyPolling;
     private readonly IOptionsMonitor<IntegrationDaemonOptions> _options;
     private readonly ILogger<IntegrationDaemonClient> _logger;
 
     public IntegrationDaemonClient(
-        HttpClient httpClient,
+        ISmappeeChargingSyncService sync,
+        ISmappeePollingService smappeePolling,
+        ISigenergyPollingService sigenergyPolling,
         IOptionsMonitor<IntegrationDaemonOptions> options,
         ILogger<IntegrationDaemonClient> logger)
     {
-        _httpClient = httpClient;
+        _sync = sync;
+        _smappeePolling = smappeePolling;
+        _sigenergyPolling = sigenergyPolling;
         _options = options;
         _logger = logger;
     }
 
-    public Task<SmappeeUpdateTriggerResult> TriggerSmappeeUpdateAsync(
+    public async Task<SmappeeUpdateTriggerResult> TriggerSmappeeUpdateAsync(
         DateOnly? from,
         DateOnly? to,
         CancellationToken cancellationToken)
-        => TriggerAsync("/api/smappee/update", new SmappeeUpdateRequest { From = from, To = to }, cancellationToken);
-
-    public Task<SigenergyUpdateTriggerResult> TriggerSigenergyUpdateAsync(CancellationToken cancellationToken)
-        => TriggerSigenergyAsync(cancellationToken);
-
-    private async Task<SmappeeUpdateTriggerResult> TriggerAsync(
-        string path,
-        SmappeeUpdateRequest? requestBody,
-        CancellationToken cancellationToken)
     {
-        var options = _options.CurrentValue;
-        if (!options.Enabled)
+        if (!_options.CurrentValue.Enabled)
         {
             return new SmappeeUpdateTriggerResult(
                 Success: false,
                 Enabled: false,
                 FetchedAtUtc: null,
-                Error: "Integration daemon trigger is disabled in backend configuration.");
+                Error: "Smappee and Sigenergy updates are disabled.");
         }
 
         try
         {
-            var endpoint = BuildEndpoint(options.BaseUrl, path);
-            using var request = new HttpRequestMessage(HttpMethod.Post, endpoint)
+            if (from.HasValue || to.HasValue)
             {
-                Content = requestBody == null ? null : JsonContent.Create(requestBody)
-            };
-            if (!string.IsNullOrWhiteSpace(options.ApiKey))
-                request.Headers.Add("x-api-key", options.ApiKey);
+                if (!from.HasValue || !to.HasValue)
+                {
+                    return new SmappeeUpdateTriggerResult(
+                        Success: false,
+                        Enabled: true,
+                        FetchedAtUtc: null,
+                        Error: "Both 'from' and 'to' are required when specifying a range.");
+                }
 
-            using var response = await _httpClient.SendAsync(request, cancellationToken);
-            if (!response.IsSuccessStatusCode)
-            {
-                var body = await response.Content.ReadAsStringAsync(cancellationToken);
-                _logger.LogWarning(
-                    "Integration daemon update failed with status {StatusCode}: {Body}. Endpoint={Endpoint}, apiKeyConfigured={ApiKeyConfigured}, apiKeyLength={ApiKeyLength}",
-                    (int)response.StatusCode,
-                    body,
-                    endpoint,
-                    !string.IsNullOrWhiteSpace(options.ApiKey),
-                    options.ApiKey?.Length ?? 0);
+                if (to.Value < from.Value)
+                {
+                    return new SmappeeUpdateTriggerResult(
+                        Success: false,
+                        Enabled: true,
+                        FetchedAtUtc: null,
+                        Error: "'to' date must be on or after 'from' date.");
+                }
+
+                var syncResult = await _sync.SyncSmappeeCalendarAsync(
+                    from.Value,
+                    to.Value,
+                    "Manual Smappee range sync",
+                    cancellationToken);
 
                 return new SmappeeUpdateTriggerResult(
-                    Success: false,
+                    Success: syncResult.Success,
                     Enabled: true,
-                    FetchedAtUtc: null,
-                    Error: $"Daemon update failed with HTTP {(int)response.StatusCode}.");
+                    FetchedAtUtc: DateTimeOffset.UtcNow,
+                    Error: syncResult.ErrorMessage,
+                    CardsAdded: syncResult.CardsAdded,
+                    CardsUpdated: syncResult.CardsUpdated,
+                    SessionsAdded: syncResult.SessionsAdded,
+                    SessionsUpdated: syncResult.SessionsUpdated,
+                    SessionsSkipped: syncResult.SessionsSkipped,
+                    SessionsErrors: syncResult.SessionsErrors,
+                    SessionsInferredClosed: syncResult.SessionsInferredClosed);
             }
 
-            var responsePayload = await response.Content.ReadFromJsonAsync<DaemonUpdateResponse>(cancellationToken: cancellationToken);
+            var snapshot = await _smappeePolling.PollSessionsAsync(cancellationToken);
             return new SmappeeUpdateTriggerResult(
-                Success: responsePayload?.Ok ?? true,
+                Success: snapshot.IsSuccess,
                 Enabled: true,
-                FetchedAtUtc: responsePayload?.FetchedAtUtc,
-                Error: responsePayload?.Error,
-                CardsAdded: responsePayload?.ChargeCards?.Added ?? 0,
-                CardsUpdated: responsePayload?.ChargeCards?.Updated ?? 0,
-                SessionsAdded: responsePayload?.Sessions?.Added ?? 0,
-                SessionsUpdated: responsePayload?.Sessions?.Updated ?? 0,
-                SessionsSkipped: responsePayload?.Sessions?.Skipped ?? 0,
-                SessionsErrors: responsePayload?.Sessions?.Errors ?? 0,
-                SessionsInferredClosed: responsePayload?.Sessions?.InferredClosed ?? 0);
+                FetchedAtUtc: new DateTimeOffset(DateTime.SpecifyKind(snapshot.FetchedAtUtc, DateTimeKind.Utc)),
+                Error: snapshot.Error);
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Failed to trigger Smappee update via integration daemon");
+            _logger.LogError(ex, "Smappee update failed");
             return new SmappeeUpdateTriggerResult(
                 Success: false,
                 Enabled: true,
                 FetchedAtUtc: null,
-                Error: "Could not reach integration daemon update endpoint.");
+                Error: "Smappee update failed.");
         }
     }
 
-    private async Task<SigenergyUpdateTriggerResult> TriggerSigenergyAsync(CancellationToken cancellationToken)
+    public async Task<SigenergyUpdateTriggerResult> TriggerSigenergyUpdateAsync(CancellationToken cancellationToken)
     {
-        var options = _options.CurrentValue;
-        if (!options.Enabled)
+        if (!_options.CurrentValue.Enabled)
         {
             return new SigenergyUpdateTriggerResult(
                 Success: false,
                 Enabled: false,
                 FetchedAtUtc: null,
-                Error: "Integration daemon trigger is disabled in backend configuration.");
+                Error: "Smappee and Sigenergy updates are disabled.");
         }
 
         try
         {
-            var endpoint = BuildEndpoint(options.BaseUrl, "/api/sigenergy/update");
-            using var request = new HttpRequestMessage(HttpMethod.Post, endpoint);
-            if (!string.IsNullOrWhiteSpace(options.ApiKey))
-                request.Headers.Add("x-api-key", options.ApiKey);
-
-            using var response = await _httpClient.SendAsync(request, cancellationToken);
-            if (!response.IsSuccessStatusCode)
-            {
-                var body = await response.Content.ReadAsStringAsync(cancellationToken);
-                _logger.LogWarning(
-                    "Integration daemon Sigenergy update failed with status {StatusCode}: {Body}. Endpoint={Endpoint}, apiKeyConfigured={ApiKeyConfigured}, apiKeyLength={ApiKeyLength}",
-                    (int)response.StatusCode,
-                    body,
-                    endpoint,
-                    !string.IsNullOrWhiteSpace(options.ApiKey),
-                    options.ApiKey?.Length ?? 0);
-
-                return new SigenergyUpdateTriggerResult(
-                    Success: false,
-                    Enabled: true,
-                    FetchedAtUtc: null,
-                    Error: $"Daemon Sigenergy update failed with HTTP {(int)response.StatusCode}.");
-            }
-
-            var payload = await response.Content.ReadFromJsonAsync<DaemonSigenergyUpdateResponse>(cancellationToken: cancellationToken);
+            var snapshot = await _sigenergyPolling.PollEnergyFlowAsync(cancellationToken);
             return new SigenergyUpdateTriggerResult(
-                Success: payload?.Ok ?? true,
+                Success: snapshot.IsSuccess,
                 Enabled: true,
-                FetchedAtUtc: payload?.FetchedAtUtc,
-                Error: payload?.Error);
+                FetchedAtUtc: new DateTimeOffset(DateTime.SpecifyKind(snapshot.FetchedAtUtc, DateTimeKind.Utc)),
+                Error: snapshot.Error);
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Failed to trigger Sigenergy update via integration daemon");
+            _logger.LogError(ex, "Sigenergy update failed");
             return new SigenergyUpdateTriggerResult(
                 Success: false,
                 Enabled: true,
                 FetchedAtUtc: null,
-                Error: "Could not reach integration daemon Sigenergy update endpoint.");
+                Error: "Sigenergy update failed.");
         }
-    }
-
-    private static string BuildEndpoint(string? baseUrl, string path)
-    {
-        var root = string.IsNullOrWhiteSpace(baseUrl)
-            ? "http://localhost:7071"
-            : baseUrl.Trim().TrimEnd('/');
-        return $"{root}{path}";
-    }
-
-    private sealed class DaemonUpdateResponse
-    {
-        public bool Ok { get; set; }
-        public DateTimeOffset? FetchedAtUtc { get; set; }
-        public string? Error { get; set; }
-        public DaemonSyncCounters? ChargeCards { get; set; }
-        public DaemonSyncCounters? Sessions { get; set; }
-    }
-
-    private sealed class DaemonSyncCounters
-    {
-        public int Added { get; set; }
-        public int Updated { get; set; }
-        public int Skipped { get; set; }
-        public int Errors { get; set; }
-        public int InferredClosed { get; set; }
-    }
-
-    private sealed class SmappeeUpdateRequest
-    {
-        public DateOnly? From { get; set; }
-        public DateOnly? To { get; set; }
-    }
-
-    private sealed class DaemonSigenergyUpdateResponse
-    {
-        public bool Ok { get; set; }
-        public DateTimeOffset? FetchedAtUtc { get; set; }
-        public string? Error { get; set; }
     }
 }

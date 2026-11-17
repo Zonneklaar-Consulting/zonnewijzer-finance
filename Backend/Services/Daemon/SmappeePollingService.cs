@@ -5,7 +5,7 @@ using Backend.Services.Smappee;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 
-namespace IntegrationDaemon.Services;
+namespace Backend.Services.Daemon;
 
 public interface ISmappeePollingService
 {
@@ -128,7 +128,7 @@ public class SmappeePollingService : ISmappeePollingService
                 _db.EventLogs.Add(new EventLog
                 {
                     Timestamp = DateTime.UtcNow,
-                    UserName = "Integration daemon scheduled sync",
+                    UserName = "Scheduled Smappee sync",
                     Action = $"Charging station {serial} state changed: {previousState} -> {currentState}"
                 });
             }
@@ -170,7 +170,7 @@ public class SmappeePollingService : ISmappeePollingService
             var syncResult = await _chargingSync.SyncSmappeeCalendarAsync(
                 from,
                 todayBrussels,
-                "Integration daemon scheduled sync",
+                "Scheduled Smappee sync",
                 cancellationToken);
 
             if (!syncResult.Success)

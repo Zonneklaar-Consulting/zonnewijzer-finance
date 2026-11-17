@@ -42,7 +42,7 @@ public class SigenergyController : ControllerBase
             return Ok(new SigenergyLiveResponse
             {
                 Configured = false,
-                Error = "No Sigenergy snapshot available yet. Wait for integration daemon polling."
+                Error = "No Sigenergy snapshot available yet. Wait for the next poll."
             });
         }
         catch (Exception ex)

@@ -4,11 +4,28 @@ services:
     container_name: finance-backend
     ports:
       - "8080:5000"
+    env_file:
+      - path: backend.integration.env
+        required: false
     environment:
       - ASPNETCORE_ENVIRONMENT=Production
       - ASPNETCORE_URLS=http://+:5000
       - ConnectionStrings__DefaultConnection=Data Source=/app/database/finance.db
-      - IntegrationDaemon__ApiKey=${DAEMON_API_KEY:-}
+      - Smappee__BaseUrl=${SMAPPEE_BASE_URL:-https://app1pub.smappee.net/dev/v3}
+      - Smappee__ClientId=${SMAPPEE_CLIENT_ID:-}
+      - Smappee__ClientSecret=${SMAPPEE_CLIENT_SECRET:-}
+      - Smappee__Username=${SMAPPEE_USERNAME:-}
+      - Smappee__Password=${SMAPPEE_PASSWORD:-}
+      - Smappee__ServiceLocationId=${SMAPPEE_SERVICE_LOCATION_ID:-}
+      - Sigenergy__BaseUrl=${SIGENERGY_BASE_URL:-https://api-eu.sigencloud.com}
+      - Sigenergy__Username=${SIGENERGY_USERNAME:-}
+      - Sigenergy__Password=${SIGENERGY_PASSWORD:-}
+      - Sigenergy__SystemId=${SIGENERGY_SYSTEM_ID:-}
+      - Sigenergy__UsableBatteryCapacityKwh=${SIGENERGY_USABLE_BATTERY_CAPACITY_KWH:-}
+      - SmappeeDaemon__Enabled=true
+      - SmappeeDaemon__PollIntervalMinutes=5
+      - SigenergyDaemon__Enabled=true
+      - SigenergyDaemon__PollIntervalMinutes=5
       - Jwt__Key=${JWT_KEY}
       - GitHub__ClientId=${GITHUB_CLIENT_ID}
       - GitHub__ClientSecret=${GITHUB_CLIENT_SECRET}
@@ -36,45 +53,6 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
-
-  integration-daemon:
-    image: philipsen/finance-integration-daemon:latest
-    container_name: finance-integration-daemon
-    depends_on:
-      - backend
-    env_file:
-      - path: IntegrationDaemon/.env
-        required: false
-    environment:
-      - DOTNET_ENVIRONMENT=Production
-      - ASPNETCORE_URLS=http://+:7071
-      - ConnectionStrings__DefaultConnection=Data Source=/app/database/finance.db
-      - DaemonApi__ApiKey=${DAEMON_API_KEY:-}
-      - Smappee__BaseUrl=${SMAPPEE_BASE_URL:-https://app1pub.smappee.net/dev/v3}
-      - Smappee__ClientId=${SMAPPEE_CLIENT_ID:-}
-      - Smappee__ClientSecret=${SMAPPEE_CLIENT_SECRET:-}
-      - Smappee__Username=${SMAPPEE_USERNAME:-}
-      - Smappee__Password=${SMAPPEE_PASSWORD:-}
-      - Smappee__ServiceLocationId=${SMAPPEE_SERVICE_LOCATION_ID:-}
-      - Sigenergy__BaseUrl=${SIGENERGY_BASE_URL:-https://api-eu.sigencloud.com}
-      - Sigenergy__Username=${SIGENERGY_USERNAME:-}
-      - Sigenergy__Password=${SIGENERGY_PASSWORD:-}
-      - Sigenergy__SystemId=${SIGENERGY_SYSTEM_ID:-}
-      - Sigenergy__UsableBatteryCapacityKwh=${SIGENERGY_USABLE_BATTERY_CAPACITY_KWH:-}
-      - SmappeeDaemon__Enabled=true
-      - SmappeeDaemon__PollIntervalMinutes=5
-      - SigenergyDaemon__Enabled=true
-      - SigenergyDaemon__PollIntervalMinutes=5
-      - SEQ_SERVER_URL=${DAEMON_SEQ_SERVER_URL:-http://seq:80}
-    expose:
-      - "7071"
-    volumes:
-      - ./data:/app/database
-      - ./logs:/app/logs
-    networks:
-      - finance-network
-      - seq-network
-    restart: unless-stopped
 
 networks:
   finance-network:

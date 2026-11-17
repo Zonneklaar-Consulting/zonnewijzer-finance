@@ -121,7 +121,7 @@ public class ChargingStationsController : ControllerBase
                 }
             }
 
-            return StatusCode(503, new { error = "No Smappee snapshot available yet. Wait for integration daemon polling." });
+            return StatusCode(503, new { error = "No Smappee snapshot available yet. Wait for the next poll." });
         }
         catch (OperationCanceledException)
         {

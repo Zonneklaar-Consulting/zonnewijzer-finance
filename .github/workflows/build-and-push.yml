@@ -30,14 +30,6 @@ jobs:
           push: true
           tags: philipsen/finance-backend:latest
 
-      - name: Build and push integration-daemon image
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          file: ./IntegrationDaemon/Dockerfile
-          push: true
-          tags: philipsen/finance-integration-daemon:latest
-
   deploy:
     needs: build-and-push
     runs-on: ubuntu-latest
@@ -63,4 +55,10 @@ jobs:
           key: ${{ secrets.DEPLOY_SSH_KEY }}
           script: |
             cd compose/zonnewijzer-finance
-            ./update-and-restart.sh
+            if [ -f IntegrationDaemon/.env ]; then
+              cp IntegrationDaemon/.env backend.integration.env
+            fi
+            docker compose -f docker-compose.production.yml pull
+            docker compose -f docker-compose.production.yml up -d --remove-orphans
+            docker rm -f finance-integration-daemon >/dev/null 2>&1 || true
+            docker compose -f docker-compose.production.yml ps

@@ -103,9 +103,8 @@ Other backend secrets (unchanged by this SMTP move):
 | `JWT_KEY` | JWT signing |
 | `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET` | GitHub OAuth |
 | `MOLLIE_API_KEY` | Payments |
-| `DAEMON_API_KEY` | Backend ↔ integration daemon |
 | `BOOTSTRAP_ADMIN_PASSWORD` | Optional first admin seed |
-| Smappee / Sigenergy vars on daemon | Integration daemon `.env` |
+| Smappee / Sigenergy vars | Backend `backend.integration.env` (seeded from `IntegrationDaemon/.env` on deploy) |
 
 After updating `SMTP_PASSWORD`, redeploy or restart the backend container:
 

@@ -125,7 +125,7 @@ public class ChargingSessionsController : ControllerBase
         {
             return StatusCode(StatusCodes.Status503ServiceUnavailable, new
             {
-                message = result.Error ?? "Integration daemon trigger is disabled."
+                message = result.Error ?? "Smappee and Sigenergy updates are disabled."
             });
         }
 
@@ -133,13 +133,13 @@ public class ChargingSessionsController : ControllerBase
         {
             return StatusCode(StatusCodes.Status502BadGateway, new
             {
-                message = result.Error ?? "Integration daemon update failed."
+                message = result.Error ?? "Smappee update failed."
             });
         }
 
         return Ok(new
         {
-            message = "Smappee daemon update triggered successfully.",
+            message = "Smappee update completed.",
             fetchedAtUtc = result.FetchedAtUtc,
             chargeCards = new { added = result.CardsAdded, updated = result.CardsUpdated },
             sessions = new
