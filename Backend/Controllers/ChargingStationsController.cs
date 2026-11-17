@@ -402,11 +402,79 @@ public class ChargingStationsController : ControllerBase
         }
 
         var mergedSquares = MergeSquaresByNormalizedNameKeepingStrongest(squares);
+        await ApplyOpenSessionsAsync(mergedSquares, cancellationToken);
         await FillEndedAtFromSessionsAsync(mergedSquares, cancellationToken);
         var serialNumbers = discoveredSerials
             .OrderBy(x => x, StringComparer.OrdinalIgnoreCase)
             .ToArray();
         return new HomeSquaresResult(mergedSquares, serialNumbers);
+    }
+
+    /// <summary>
+    /// A session that is still open in the database keeps the station occupied.
+    /// The live snapshot only covers the recent lookback, so a long session would otherwise look free.
+    /// </summary>
+    private async Task ApplyOpenSessionsAsync(
+        IReadOnlyList<ChargingStationHomeSquareDto> squares,
+        CancellationToken cancellationToken)
+    {
+        var serials = squares
+            .Where(station => !station.InUse)
+            .SelectMany(SerialsForStation)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        if (serials.Count == 0)
+            return;
+
+        var open = await _context.ChargingSessions
+            .AsNoTracking()
+            .Where(session => session.ToTimestamp == null && session.SerialNumber != null && serials.Contains(session.SerialNumber))
+            .OrderByDescending(session => session.FromTimestamp)
+            .Select(session => new { session.SerialNumber, session.Status, session.StartReading, session.StopReading })
+            .ToListAsync(cancellationToken);
+
+        var bySerial = new Dictionary<string, (string? Status, decimal? Start, decimal? Stop)>(StringComparer.OrdinalIgnoreCase);
+        foreach (var session in open)
+        {
+            var serial = session.SerialNumber!.Trim();
+            if (!bySerial.ContainsKey(serial))
+                bySerial[serial] = (session.Status, session.StartReading, session.StopReading);
+        }
+
+        foreach (var station in squares)
+        {
+            if (station.InUse)
+                continue;
+
+            (string? Status, decimal? Start, decimal? Stop)? match = null;
+            foreach (var serial in SerialsForStation(station))
+            {
+                if (!bySerial.TryGetValue(serial, out var session))
+                    continue;
+                match = session;
+                if (string.IsNullOrWhiteSpace(station.SessionSerial))
+                    station.SessionSerial = serial;
+                break;
+            }
+
+            if (match == null)
+                continue;
+
+            var state = LiveStateFromOpenSession(match.Value.Status);
+            station.LiveState = state;
+            station.InUse = true;
+            station.EndedAtUtc = null;
+            station.EnergyKwh ??= ChargingSessionEnergy.TryDeltaKwhFromReadings(match.Value.Start, match.Value.Stop);
+            if (station.PowerWatts == null && state == ChargingStationHomeSquareDto.LiveStateIdle)
+                station.PowerWatts = 0;
+        }
+    }
+
+    private static string LiveStateFromOpenSession(string? status)
+    {
+        if (string.Equals(status, "CHARGING", StringComparison.OrdinalIgnoreCase))
+            return ChargingStationHomeSquareDto.LiveStateActive;
+        return ChargingStationHomeSquareDto.LiveStateIdle;
     }
 
     private async Task FillEndedAtFromSessionsAsync(
@@ -506,17 +574,8 @@ public class ChargingStationsController : ControllerBase
         var cardIds = new HashSet<int>();
         foreach (var station in occupied)
         {
-            if (cardBySerial.TryGetValue(station.Serial!, out var fromSession))
-            {
-                cardIds.Add(fromSession);
-                continue;
-            }
-
-            if (string.IsNullOrWhiteSpace(station.Rfid))
-                continue;
-            var token = ChargeCardImportIds.NormalizeTokenKey(station.Rfid);
-            if (cardIdByToken.TryGetValue(token, out var fromRfid))
-                cardIds.Add(fromRfid);
+            if (TryCardForStation(station, cardBySerial, cardIdByToken, out var cardId))
+                cardIds.Add(cardId);
         }
 
         if (cardIds.Count == 0)
@@ -541,21 +600,36 @@ public class ChargingStationsController : ControllerBase
 
         foreach (var station in occupied)
         {
-            int? cardId = null;
-            if (cardBySerial.TryGetValue(station.Serial!, out var fromSession))
-                cardId = fromSession;
-            else if (!string.IsNullOrWhiteSpace(station.Rfid))
-            {
-                var token = ChargeCardImportIds.NormalizeTokenKey(station.Rfid);
-                if (cardIdByToken.TryGetValue(token, out var fromRfid))
-                    cardId = fromRfid;
-            }
-
-            if (cardId.HasValue && codeByCard.TryGetValue(cardId.Value, out var code))
-                codes[station.Serial!] = code;
+            if (!TryCardForStation(station, cardBySerial, cardIdByToken, out var cardId))
+                continue;
+            if (codeByCard.TryGetValue(cardId, out var code) && !string.IsNullOrWhiteSpace(station.Serial))
+                codes[station.Serial] = code;
         }
 
         return codes;
+    }
+
+    private static bool TryCardForStation(
+        ChargingStationHomeSquareDto station,
+        IReadOnlyDictionary<string, int> cardBySerial,
+        IReadOnlyDictionary<string, int> cardIdByToken,
+        out int cardId)
+    {
+        foreach (var serial in SerialsForStation(station))
+        {
+            if (cardBySerial.TryGetValue(serial, out cardId))
+                return true;
+        }
+
+        if (!string.IsNullOrWhiteSpace(station.Rfid))
+        {
+            var token = ChargeCardImportIds.NormalizeTokenKey(station.Rfid);
+            if (cardIdByToken.TryGetValue(token, out cardId))
+                return true;
+        }
+
+        cardId = 0;
+        return false;
     }
 
     private sealed record HomeSquaresResult(List<ChargingStationHomeSquareDto> Squares, string[] SerialNumbers);
